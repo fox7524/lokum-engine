@@ -25,7 +25,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/<YOU>/lokum-engine"
+Homepage = "https://github.com/fox7524/lokum-engine"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
