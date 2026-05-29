@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
+from typing import Any, Dict
 from typing import List
 
 
@@ -187,8 +189,103 @@ def _presplit_jsonl_file(fp: str, max_seq_length: int, batch_size: int) -> int:
     return changed
 
 
+@dataclass(frozen=True)
+class FinetuneQualityProfile:
+    """
+    LoRA fine-tuning kalite profili.
+
+    Buradaki "kalite" aslında "daha iyi öğrenme kapasitesi için daha agresif ayarlar"
+    demek (daha fazla layer / daha uzun seq / daha fazla iter vs.).
+
+    Not:
+    - Bazı ayarlar donanım/model boyutuna göre OOM yapabilir.
+    - Bu yüzden ENV ile override’a izin veriyoruz.
+    """
+
+    name: str
+    # Training loop
+    batch_size: int
+    num_layers: int
+    iters: int
+    # Memory / stability knobs
+    max_seq_length: int
+    clear_cache_threshold: float
+    steps_per_eval: int
+    val_batches: int
+    grad_checkpoint: bool
+    # Presplit policy (token->char approx)
+    presplit_chars_per_token: float
+
+
+FINETUNE_QUALITY_PROFILES: Dict[str, FinetuneQualityProfile] = {
+    # Base: hızlı deneme, daha güvenli bellek kullanımı
+    "base": FinetuneQualityProfile(
+        name="base",
+        batch_size=1,
+        num_layers=8,
+        iters=80,
+        max_seq_length=384,
+        clear_cache_threshold=1.5,
+        steps_per_eval=250,
+        val_batches=1,
+        grad_checkpoint=True,
+        presplit_chars_per_token=3.5,
+    ),
+    # Mid: mevcut davranışa en yakın (engine default’ları + yaygın env default’ları)
+    "mid": FinetuneQualityProfile(
+        name="mid",
+        batch_size=2,
+        num_layers=16,
+        iters=100,
+        max_seq_length=512,
+        clear_cache_threshold=2.0,
+        steps_per_eval=200,
+        val_batches=1,
+        grad_checkpoint=True,
+        presplit_chars_per_token=4.0,
+    ),
+    # Fab: daha fazla kapasite (daha çok layer + iter + daha uzun seq)
+    # Risk: küçük makinelerde OOM olabilir → ENV override ile düşürülebilir.
+    "fab": FinetuneQualityProfile(
+        name="fab",
+        batch_size=2,
+        num_layers=24,
+        iters=200,
+        max_seq_length=768,
+        clear_cache_threshold=2.5,
+        steps_per_eval=200,
+        val_batches=1,
+        grad_checkpoint=True,
+        presplit_chars_per_token=4.0,
+    ),
+}
+
+
+def normalize_finetune_quality(value: str | None) -> str:
+    v = (value or "").strip().lower()
+    if not v:
+        return "mid"
+    if v in ("base", "low", "fast", "lite", "quick"):
+        return "base"
+    if v in ("mid", "medium", "med", "default", "normal", "std", "standard"):
+        return "mid"
+    if v in ("fab", "fabulous", "faboulous", "fabolous", "fabulus", "high", "hq", "best"):
+        return "fab"
+    return "mid"
+
+
+def get_finetune_quality_profile(value: str | None) -> FinetuneQualityProfile:
+    q = normalize_finetune_quality(value)
+    return FINETUNE_QUALITY_PROFILES.get(q, FINETUNE_QUALITY_PROFILES["mid"])
+
+
+def _env_or(default: str, env_key: str) -> str:
+    raw = (os.environ.get(env_key) or "").strip()
+    return raw if raw else default
+
+
 class FinetuneEngine:
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, quality: str | None = None):
         self.model_path = model_path
 
         # Keep large/private training artifacts out of the git repo by default.
@@ -201,6 +298,10 @@ class FinetuneEngine:
         except Exception:
             self.dataset_dir = "lora_data"
             os.makedirs(self.dataset_dir, exist_ok=True)
+
+        # Quality profile (ENV fallback)
+        env_quality = (os.environ.get("LOKUMAI_FT_QUALITY") or "").strip()
+        self.quality_profile = get_finetune_quality_profile(quality or env_quality)
 
     def prepare_dataset(self, text_chunks: List[str]):
         """Converts raw text chunks into a train/valid JSONL dataset for MLX lora."""
@@ -272,9 +373,9 @@ class FinetuneEngine:
 
     def start_training(
         self,
-        batch_size=2,
-        num_layers=16,
-        iters=100,
+        batch_size: int | None = None,
+        num_layers: int | None = None,
+        iters: int | None = None,
         dataset_path=None,
         adapter_path=None,
         config_path=None,
@@ -283,6 +384,11 @@ class FinetuneEngine:
         """Starts the MLX LoRA training loop as a non-blocking subprocess."""
 
         data_dir = dataset_path if dataset_path else self.dataset_dir
+        prof = getattr(self, "quality_profile", FINETUNE_QUALITY_PROFILES["mid"])
+        eff_batch = int(batch_size) if batch_size is not None else int(prof.batch_size)
+        eff_layers = int(num_layers) if num_layers is not None else int(prof.num_layers)
+        eff_iters = int(iters) if iters is not None else int(prof.iters)
+
         cmd = [
             sys.executable,
             "-m",
@@ -294,23 +400,42 @@ class FinetuneEngine:
             "--data",
             data_dir,
         ]
-        cmd += ["--batch-size", str(batch_size), "--num-layers", str(num_layers), "--iters", str(iters)]
+        cmd += ["--batch-size", str(eff_batch), "--num-layers", str(eff_layers), "--iters", str(eff_iters)]
         if resume_adapter_file:
             cmd += ["--resume-adapter-file", str(resume_adapter_file)]
-        if os.environ.get("LOKUMAI_FT_GRAD_CHECKPOINT", "1") != "0":
+
+        # ---- Advanced knobs: ENV > quality profile defaults ----
+        # grad-checkpoint (flag)
+        grad_ck_env = (os.environ.get("LOKUMAI_FT_GRAD_CHECKPOINT") or "").strip()
+        if grad_ck_env:
+            grad_ck = grad_ck_env != "0"
+        else:
+            grad_ck = bool(prof.grad_checkpoint)
+        if grad_ck:
             cmd += ["--grad-checkpoint"]
-        val_batches = os.environ.get("LOKUMAI_FT_VAL_BATCHES", "1").strip()
-        if val_batches:
-            cmd += ["--val-batches", str(val_batches)]
-        steps_per_eval = os.environ.get("LOKUMAI_FT_STEPS_PER_EVAL", "200").strip()
-        if steps_per_eval:
-            cmd += ["--steps-per-eval", str(steps_per_eval)]
-        max_seq = os.environ.get("LOKUMAI_FT_MAX_SEQ_LENGTH", "512").strip()
-        if max_seq:
-            cmd += ["--max-seq-length", str(max_seq)]
-        clear_thr = os.environ.get("LOKUMAI_FT_CLEAR_CACHE_THRESHOLD", "2.0").strip()
-        if clear_thr:
-            cmd += ["--clear-cache-threshold", str(clear_thr)]
+
+        # numeric args
+        val_batches = _env_or(str(int(prof.val_batches)), "LOKUMAI_FT_VAL_BATCHES")
+        cmd += ["--val-batches", str(val_batches)]
+
+        steps_per_eval = _env_or(str(int(prof.steps_per_eval)), "LOKUMAI_FT_STEPS_PER_EVAL")
+        cmd += ["--steps-per-eval", str(steps_per_eval)]
+
+        max_seq = _env_or(str(int(prof.max_seq_length)), "LOKUMAI_FT_MAX_SEQ_LENGTH")
+        cmd += ["--max-seq-length", str(max_seq)]
+
+        clear_thr = _env_or(str(float(prof.clear_cache_threshold)), "LOKUMAI_FT_CLEAR_CACHE_THRESHOLD")
+        cmd += ["--clear-cache-threshold", str(clear_thr)]
+
+        # Presplit (dataset yazımını bozmadan; sadece default’u profile’a göre ayarla)
+        # Not: _presplit_text içindeki env default 4.0; burada profile’a göre set ediyoruz
+        # ama user ENV ile override ederse dokunmuyoruz.
+        if not (os.environ.get("LOKUMAI_FT_PRESPLIT_CHARS_PER_TOKEN") or "").strip():
+            try:
+                os.environ["LOKUMAI_FT_PRESPLIT_CHARS_PER_TOKEN"] = str(float(prof.presplit_chars_per_token))
+            except Exception:
+                pass
+
         if adapter_path:
             cmd += ["--adapter-path", str(adapter_path)]
         if config_path:
@@ -351,15 +476,13 @@ class FinetuneEngine:
             pass
 
         cmd = [sys.executable, "-m", "mlx_lm", "lora", "--model", self.model_path, "--data", eval_dir, "--test"]
-        test_batches = os.environ.get("LOKUMAI_FT_TEST_BATCHES", "1").strip()
-        if test_batches:
-            cmd += ["--test-batches", str(test_batches)]
-        max_seq = os.environ.get("LOKUMAI_FT_MAX_SEQ_LENGTH", "512").strip()
-        if max_seq:
-            cmd += ["--max-seq-length", str(max_seq)]
-        clear_thr = os.environ.get("LOKUMAI_FT_CLEAR_CACHE_THRESHOLD", "2.0").strip()
-        if clear_thr:
-            cmd += ["--clear-cache-threshold", str(clear_thr)]
+        prof = getattr(self, "quality_profile", FINETUNE_QUALITY_PROFILES["mid"])
+        test_batches = _env_or(str(int(os.environ.get("LOKUMAI_FT_TEST_BATCHES", "").strip() or "1")), "LOKUMAI_FT_TEST_BATCHES")
+        cmd += ["--test-batches", str(test_batches)]
+        max_seq = _env_or(str(int(prof.max_seq_length)), "LOKUMAI_FT_MAX_SEQ_LENGTH")
+        cmd += ["--max-seq-length", str(max_seq)]
+        clear_thr = _env_or(str(float(prof.clear_cache_threshold)), "LOKUMAI_FT_CLEAR_CACHE_THRESHOLD")
+        cmd += ["--clear-cache-threshold", str(clear_thr)]
         if adapter_path:
             cmd += ["--adapter-path", str(adapter_path)]
         if config_path:

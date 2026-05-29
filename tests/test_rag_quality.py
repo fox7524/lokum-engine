@@ -28,3 +28,11 @@ class TestRagQuality(unittest.TestCase):
         self.assertLess(base.fetch_multiplier, mid.fetch_multiplier)
         self.assertLess(mid.fetch_multiplier, fab.fetch_multiplier)
 
+    def test_mid_matches_expected_defaults(self):
+        mid = get_rag_quality_profile("mid")
+        # "Elimizdeki" davranışa yakın: 800/100 chunk + klasik retrieval politikası
+        self.assertEqual(mid.chunk_size, 800)
+        self.assertEqual(mid.overlap, 100)
+        self.assertEqual(mid.fetch_multiplier, 10)
+        self.assertEqual(mid.fetch_min, 50)
+        self.assertEqual(mid.fetch_cap, 500)
