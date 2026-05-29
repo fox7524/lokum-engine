@@ -1,0 +1,10 @@
+numpy
+sentence-transformers
+faiss-cpu
+PyMuPDF
+python-docx
+pillow
+pytesseract
+libzim
+mlx-lm
+huggingface_hub

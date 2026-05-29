@@ -1,0 +1,36 @@
+Metadata-Version: 2.4
+Name: lokum-engine
+Version: 0.1.0
+Summary: LokumAI engines: RAG + MLX LoRA fine-tuning utilities
+Author: fox
+License: MIT
+Project-URL: Homepage, https://github.com/<YOU>/lokum-engine
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy
+Requires-Dist: sentence-transformers
+Requires-Dist: faiss-cpu
+Requires-Dist: PyMuPDF
+Requires-Dist: python-docx
+Requires-Dist: pillow
+Requires-Dist: pytesseract
+Requires-Dist: libzim
+Requires-Dist: mlx-lm
+Requires-Dist: huggingface_hub
+
+# lokum-engine
+
+LokumAI engines packaged as a Python library:
+- RAG (FAISS + sentence-transformers)
+- Fine-tuning runner (MLX LoRA) + ChatML-safe presplitting
+
+## Install
+```bash
+pip install lokum-engine
+```
+
+## Usage
+```python
+from lokum_engine.rag import RAGEngine
+from lokum_engine.finetune import FinetuneEngine
+```
