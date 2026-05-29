@@ -7,6 +7,7 @@ License: MIT
 Project-URL: Homepage, https://github.com/<YOU>/lokum-engine
 Requires-Python: >=3.10
 Description-Content-Type: text/markdown
+License-File: LICENSE
 Requires-Dist: numpy
 Requires-Dist: sentence-transformers
 Requires-Dist: faiss-cpu
@@ -17,6 +18,7 @@ Requires-Dist: pytesseract
 Requires-Dist: libzim
 Requires-Dist: mlx-lm
 Requires-Dist: huggingface_hub
+Dynamic: license-file
 
 # lokum-engine
 
