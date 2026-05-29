@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import time
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -90,6 +91,90 @@ DEFAULT_STATE_NAME = "rag_state.json"
 DEFAULT_STAGING_DIRNAME = "staging"
 
 
+@dataclass(frozen=True)
+class RAGQualityProfile:
+    """
+    RAG kalite profili.
+
+    Not: Embedding model değişirse FAISS index boyutu/dim değişebilir; bu durumda
+    eski index ile devam etmek mümkün olmayabilir. Bu yüzden kalite seçimini
+    ideal olarak ilk init sırasında yap.
+    """
+
+    name: str
+    # Chunking
+    chunk_size: int
+    overlap: int
+    # Embedding
+    embedding_model: str
+    # Retrieval (fetch policy)
+    fetch_multiplier: int
+    fetch_min: int
+    fetch_cap: int
+
+
+RAG_QUALITY_PROFILES: Dict[str, RAGQualityProfile] = {
+    # Varsayılan davranışa en yakın: hızlı + küçük model
+    "base": RAGQualityProfile(
+        name="base",
+        chunk_size=700,
+        overlap=80,
+        embedding_model="all-MiniLM-L6-v2",
+        fetch_multiplier=6,
+        fetch_min=30,
+        fetch_cap=200,
+    ),
+    # Mevcut default’larla uyumlu (800/100, multiplier=10, cap=500)
+    "mid": RAGQualityProfile(
+        name="mid",
+        chunk_size=800,
+        overlap=100,
+        embedding_model="all-MiniLM-L6-v2",
+        fetch_multiplier=10,
+        fetch_min=50,
+        fetch_cap=500,
+    ),
+    # Daha fazla recall + daha ağır model (kullanıcı “heavy deps OK” dedi)
+    "fab": RAGQualityProfile(
+        name="fab",
+        chunk_size=1000,
+        overlap=150,
+        embedding_model="all-mpnet-base-v2",
+        fetch_multiplier=20,
+        fetch_min=80,
+        fetch_cap=1000,
+    ),
+}
+
+
+def normalize_rag_quality(value: str | None) -> str:
+    """
+    Kullanıcıdan gelen kalite string’ini normalize eder.
+
+    Kabul edilen örnekler:
+      - base: "base", "low", "fast"
+      - mid: "mid", "medium", "med", "default"
+      - fab: "fab", "fabulous", "faboulous", "fabolous", "high", "hq"
+    """
+
+    v = (value or "").strip().lower()
+    if not v:
+        return "mid"
+    if v in ("base", "low", "fast", "lite", "quick"):
+        return "base"
+    if v in ("mid", "medium", "med", "default", "normal", "std", "standard"):
+        return "mid"
+    if v in ("fab", "fabulous", "faboulous", "fabolous", "fabulus", "high", "hq", "best"):
+        return "fab"
+    # Bilinmeyen değer gelirse: mevcut davranışa en yakın
+    return "mid"
+
+
+def get_rag_quality_profile(value: str | None) -> RAGQualityProfile:
+    q = normalize_rag_quality(value)
+    return RAG_QUALITY_PROFILES.get(q, RAG_QUALITY_PROFILES["mid"])
+
+
 class RAGEngine:
     """
     Main RAG engine class. Handles:
@@ -101,7 +186,7 @@ class RAGEngine:
     Streamlined (no LangChain).
     """
 
-    def __init__(self, storage_dir: str | None = None):
+    def __init__(self, storage_dir: str | None = None, quality: str | None = None):
         # Check if we have all required dependencies
         global SentenceTransformer, HAS_SENTENCE_TRANSFORMERS
         if not HAS_SENTENCE_TRANSFORMERS:
@@ -121,6 +206,17 @@ class RAGEngine:
         if not self.enabled:
             return
 
+        # ---- Quality profile (chunking + retrieval + embedding model selection)
+        env_quality = (os.environ.get("LOKUMAI_RAG_QUALITY") or "").strip()
+        self.quality_profile = get_rag_quality_profile(quality or env_quality)
+        # Chunk defaults (chunk_text() args verilmezse bunlar kullanılır)
+        self.chunk_size = int(self.quality_profile.chunk_size)
+        self.chunk_overlap = int(self.quality_profile.overlap)
+        # Retrieval defaults (query/query_with_sources fetch policy)
+        self.fetch_multiplier = int(self.quality_profile.fetch_multiplier)
+        self.fetch_min = int(self.quality_profile.fetch_min)
+        self.fetch_cap = int(self.quality_profile.fetch_cap)
+
         self.storage_dir = os.path.abspath(storage_dir or DEFAULT_RAG_DIR)
         os.makedirs(self.storage_dir, exist_ok=True)
         self.index_path = os.path.join(self.storage_dir, DEFAULT_INDEX_NAME)
@@ -135,11 +231,15 @@ class RAGEngine:
         self.embed_device = self._select_embed_device()
         self.embed_batch_size = self._select_embed_batch_size(self.embed_device)
 
+        embed_model_name = (os.environ.get("LOKUMAI_EMBED_MODEL") or "").strip()
+        if not embed_model_name:
+            embed_model_name = str(getattr(self, "quality_profile", None).embedding_model)
+
         try:
-            self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2", device=self.embed_device)
+            self.embedding_model = SentenceTransformer(embed_model_name, device=self.embed_device)
         except TypeError:
             # Older sentence-transformers doesn't accept device= in constructor
-            self.embedding_model = SentenceTransformer("all-MiniLM-L6-v2")
+            self.embedding_model = SentenceTransformer(embed_model_name)
             try:
                 if hasattr(self.embedding_model, "to"):
                     self.embedding_model.to(self.embed_device)
@@ -404,10 +504,16 @@ class RAGEngine:
                 pass
             print(f"[RAG] Saved {len(self.documents)} chunks to index.")
 
-    def chunk_text(self, text: str, chunk_size: int = 800, overlap: int = 100) -> List[str]:
+    def chunk_text(self, text: str, chunk_size: int | None = None, overlap: int | None = None) -> List[str]:
         s = (text or "").strip()
         if not s:
             return []
+
+        # Eğer argüman verilmezse kalite profili default’larını kullan.
+        if chunk_size is None:
+            chunk_size = int(getattr(self, "chunk_size", 800))
+        if overlap is None:
+            overlap = int(getattr(self, "chunk_overlap", 100))
 
         chunk_size = max(1, int(chunk_size))
         overlap = max(0, int(overlap))
@@ -1117,6 +1223,15 @@ class RAGEngine:
         print(f"[RAG] Found {seen} supported files in {folder_abs}")
         return bool(added_total > 0)
 
+    def _fetch_k(self, k: int) -> int:
+        mult = int(getattr(self, "fetch_multiplier", 10))
+        mn = int(getattr(self, "fetch_min", 50))
+        cap = int(getattr(self, "fetch_cap", 500))
+        fk = int(max(k * mult, mn))
+        if fk > cap:
+            fk = cap
+        return fk
+
     def query(self, query_text: str, k: int = 3) -> str:
         if not self.enabled or self.index is None:
             return ""
@@ -1127,9 +1242,7 @@ class RAGEngine:
             query_vector = np.array(query_vector).astype("float32")
             self._check_abort()
 
-            fetch_k = int(max(k * 10, 50))
-            if fetch_k > 500:
-                fetch_k = 500
+            fetch_k = self._fetch_k(int(k))
             distances, indices = self.index.search(query_vector, fetch_k)
 
             results = []
@@ -1169,9 +1282,7 @@ class RAGEngine:
             query_vector = np.array(query_vector).astype("float32")
             self._check_abort()
 
-            fetch_k = int(max(k * 10, 50))
-            if fetch_k > 500:
-                fetch_k = 500
+            fetch_k = self._fetch_k(int(k))
             distances, indices = self.index.search(query_vector, fetch_k)
 
             results = []
@@ -1234,6 +1345,23 @@ class RAGEngine:
             "folder": self.indexed_folder,
         }
 
+    def set_quality(self, quality: str) -> None:
+        """
+        Runtime’da kalite profilini değiştirir (chunking + retrieval policy).
+
+        Uyarı: embedding_model seçimi __init__ sırasında yapılıyor.
+        Kalite profilin embedding_model’ı farklıysa ve bunu da değiştirmek istiyorsan,
+        en sağlıklısı yeni RAGEngine oluşturmak ve index’i yeniden üretmek.
+        """
+
+        prof = get_rag_quality_profile(quality)
+        self.quality_profile = prof
+        self.chunk_size = int(prof.chunk_size)
+        self.chunk_overlap = int(prof.overlap)
+        self.fetch_multiplier = int(prof.fetch_multiplier)
+        self.fetch_min = int(prof.fetch_min)
+        self.fetch_cap = int(prof.fetch_cap)
+
     def reset_database(self) -> None:
         for p in (self.index_path, self.docs_path, self.meta_path, self.chunks_meta_path, self.state_path):
             try:
@@ -1252,4 +1380,3 @@ class RAGEngine:
     def get_relevant_chunks(self, query: str, top_k: int = 5) -> List[str]:
         result = self.query_with_sources(query, top_k)
         return result.get("chunks", [])
-
