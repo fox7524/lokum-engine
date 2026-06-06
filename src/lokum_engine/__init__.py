@@ -4,6 +4,8 @@ from functools import partial
 
 from lokum_engine.rag.engine import RAGEngine
 from lokum_engine.rag import rag_engine_base, rag_engine_fab, rag_engine_mid
+from lokum_engine.rag import rag_reader_engine
+from lokum_engine.rag.reader_engine import RAGReaderEngine
 from lokum_engine.finetune.engine import FinetuneEngine
 from lokum_engine.finetune import finetune_engine_base, finetune_engine_fab, finetune_engine_mid
 
@@ -22,10 +24,12 @@ FinetuneEngineFab = partial(FinetuneEngine, quality="fab")
 
 __all__ = [
     "RAGEngine",
+    "RAGReaderEngine",
     "FinetuneEngine",
     "rag_engine_base",
     "rag_engine_mid",
     "rag_engine_fab",
+    "rag_reader_engine",
     "RAGEngineBase",
     "RAGEngineMid",
     "RAGEngineFab",
