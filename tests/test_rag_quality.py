@@ -36,3 +36,18 @@ class TestRagQuality(unittest.TestCase):
         self.assertEqual(mid.fetch_multiplier, 10)
         self.assertEqual(mid.fetch_min, 50)
         self.assertEqual(mid.fetch_cap, 500)
+
+    def test_reranker_profiles(self):
+        base = get_rag_quality_profile("base")
+        mid = get_rag_quality_profile("mid")
+        fab = get_rag_quality_profile("fab")
+
+        self.assertIsNone(base.rerank_model_name)
+        self.assertEqual(base.rerank_multiplier, 1)
+
+        self.assertEqual(mid.rerank_model_name, "cross-encoder/ms-marco-MiniLM-L-6-v2")
+        self.assertEqual(mid.rerank_multiplier, 3)
+
+        self.assertEqual(fab.rerank_model_name, "BAAI/bge-reranker-base")
+        self.assertEqual(fab.rerank_multiplier, 4)
+

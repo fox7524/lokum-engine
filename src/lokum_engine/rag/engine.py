@@ -33,6 +33,7 @@ except ImportError:
     print("Warning: faiss not installed. Run: pip install faiss-cpu")
 
 SentenceTransformer = None
+CrossEncoder = None
 HAS_SENTENCE_TRANSFORMERS = False
 
 # PDF processing library - extracts text from PDF files
@@ -130,6 +131,9 @@ class RAGQualityProfile:
     fetch_multiplier: int
     fetch_min: int
     fetch_cap: int
+    # Reranking
+    rerank_model_name: Optional[str] = None
+    rerank_multiplier: int = 1
 
 
 RAG_QUALITY_PROFILES: Dict[str, RAGQualityProfile] = {
@@ -142,6 +146,8 @@ RAG_QUALITY_PROFILES: Dict[str, RAGQualityProfile] = {
         fetch_multiplier=6,
         fetch_min=30,
         fetch_cap=200,
+        rerank_model_name=None,
+        rerank_multiplier=1,
     ),
     # Mevcut default’larla uyumlu (800/100, multiplier=10, cap=500)
     "mid": RAGQualityProfile(
@@ -152,6 +158,8 @@ RAG_QUALITY_PROFILES: Dict[str, RAGQualityProfile] = {
         fetch_multiplier=10,
         fetch_min=50,
         fetch_cap=500,
+        rerank_model_name="cross-encoder/ms-marco-MiniLM-L-6-v2",
+        rerank_multiplier=3,
     ),
     # Daha fazla recall + daha ağır model (kullanıcı “heavy deps OK” dedi)
     "fab": RAGQualityProfile(
@@ -162,6 +170,8 @@ RAG_QUALITY_PROFILES: Dict[str, RAGQualityProfile] = {
         fetch_multiplier=20,
         fetch_min=80,
         fetch_cap=1000,
+        rerank_model_name="BAAI/bge-reranker-base",
+        rerank_multiplier=4,
     ),
 }
 
@@ -207,16 +217,19 @@ class RAGEngine:
 
     def __init__(self, storage_dir: str | None = None, quality: str | None = None):
         # Check if we have all required dependencies
-        global SentenceTransformer, HAS_SENTENCE_TRANSFORMERS
+        global SentenceTransformer, CrossEncoder, HAS_SENTENCE_TRANSFORMERS
         if not HAS_SENTENCE_TRANSFORMERS:
             try:
                 from sentence_transformers import SentenceTransformer as _SentenceTransformer
+                from sentence_transformers import CrossEncoder as _CrossEncoder
 
                 SentenceTransformer = _SentenceTransformer
+                CrossEncoder = _CrossEncoder
                 HAS_SENTENCE_TRANSFORMERS = True
             except Exception as e:
                 HAS_SENTENCE_TRANSFORMERS = False
                 SentenceTransformer = None
+                CrossEncoder = None
                 print(
                     f"Warning: sentence-transformers not available ({e}). Install: pip install sentence-transformers"
                 )
@@ -266,6 +279,17 @@ class RAGEngine:
                     self.embedding_model.to(self.embed_device)
             except Exception:
                 pass
+
+        self.rerank_model_name = getattr(self.quality_profile, "rerank_model_name", None)
+        self.rerank_multiplier = getattr(self.quality_profile, "rerank_multiplier", 1)
+        self.cross_encoder = None
+
+        if self.rerank_model_name and CrossEncoder is not None:
+            try:
+                self.cross_encoder = CrossEncoder(self.rerank_model_name, device=self.embed_device)
+            except Exception as e:
+                print(f"Warning: Failed to load cross-encoder {self.rerank_model_name}: {e}")
+                self.cross_encoder = None
 
         self.index: Optional[faiss.Index] = None
         self.documents: List[str] = []
@@ -1247,41 +1271,8 @@ class RAGEngine:
         return fk
 
     def query(self, query_text: str, k: int = 3) -> str:
-        if not self.enabled or self.index is None:
-            return ""
-
-        try:
-            self._set_last_error("")
-            self._check_abort()
-            query_vector = self.embedding_model.encode([query_text])
-            query_vector = np.array(query_vector).astype("float32")
-            self._check_abort()
-
-            fetch_k = self._fetch_k(int(k))
-            distances, indices = self.index.search(query_vector, fetch_k)
-
-            results = []
-            for idx in indices[0]:
-                if idx == -1 or not self._is_chunk_searchable(int(idx)):
-                    continue
-                results.append(self.documents[int(idx)])
-                if len(results) >= int(k):
-                    break
-
-            if not results:
-                return ""
-            return "\n\n---\n\n".join(results)
-        except Exception as e:
-            if "aborted" in str(e).lower():
-                self._set_last_error(str(e))
-                try:
-                    self.clear_abort()
-                except Exception:
-                    pass
-                return ""
-            self._set_last_error(str(e))
-            logger.exception("RAG query failed")
-            return ""
+        res = self.query_with_sources(query_text, k)
+        return str(res.get("context") or "")
 
     def query_with_sources(self, query_text: str, k: int = 3) -> Dict[str, Any]:
         if not self.enabled or self.index is None:
@@ -1293,6 +1284,11 @@ class RAGEngine:
             query_vector = self.embedding_model.encode([query_text])
             query_vector = np.array(query_vector).astype("float32")
             self._check_abort()
+
+            rerank_active = getattr(self, "cross_encoder", None) is not None
+            if rerank_active:
+                rerank_mult = getattr(self, "rerank_multiplier", 1)
+                top_n = max(k, int(k * rerank_mult))
 
             fetch_k = self._fetch_k(int(k))
             distances, indices = self.index.search(query_vector, fetch_k)
@@ -1312,8 +1308,25 @@ class RAGEngine:
                     if isinstance(meta, dict):
                         src = dict(meta)
                 sources.append(src)
-                if len(results) >= int(k):
-                    break
+                
+                if rerank_active:
+                    if len(results) >= top_n:
+                        break
+                else:
+                    if len(results) >= int(k):
+                        break
+
+            if rerank_active and len(results) > 0:
+                pairs = [[query_text, chunk] for chunk in results]
+                scores = self.cross_encoder.predict(pairs)
+                
+                scored_results = list(zip(scores, results, dists, sources))
+                scored_results.sort(key=lambda x: x[0], reverse=True)
+                
+                scored_results = scored_results[:int(k)]
+                results = [x[1] for x in scored_results]
+                dists = [float(x[2]) for x in scored_results]
+                sources = [x[3] for x in scored_results]
 
             return {
                 "context": "\n\n---\n\n".join(results),

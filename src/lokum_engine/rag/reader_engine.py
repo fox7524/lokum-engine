@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 SentenceTransformer = None
+CrossEncoder = None
 HAS_SENTENCE_TRANSFORMERS = False
 
 try:
@@ -97,19 +98,22 @@ class RAGReaderEngine:
             pass
 
     def _ensure_sentence_transformer(self) -> bool:
-        global SentenceTransformer, HAS_SENTENCE_TRANSFORMERS
+        global SentenceTransformer, CrossEncoder, HAS_SENTENCE_TRANSFORMERS
         if HAS_SENTENCE_TRANSFORMERS and SentenceTransformer is not None:
             return True
         try:
             from sentence_transformers import SentenceTransformer as _SentenceTransformer
+            from sentence_transformers import CrossEncoder as _CrossEncoder
 
             SentenceTransformer = _SentenceTransformer
+            CrossEncoder = _CrossEncoder
             HAS_SENTENCE_TRANSFORMERS = True
             return True
         except Exception as e:
             self._set_last_error(f"sentence-transformers not available: {e}")
             HAS_SENTENCE_TRANSFORMERS = False
             SentenceTransformer = None
+            CrossEncoder = None
             return False
 
     def _fetch_k(self, k: int) -> int:
@@ -241,10 +245,31 @@ class RAGReaderEngine:
             except TypeError:
                 self.embedding_model = SentenceTransformer(embed_model_name)
 
+        if not hasattr(self, "cross_encoder"):
+            qp = getattr(self, "quality_profile", None)
+            self.rerank_model_name = getattr(qp, "rerank_model_name", None) if qp else None
+            self.rerank_multiplier = getattr(qp, "rerank_multiplier", 1) if qp else 1
+            self.cross_encoder = None
+            if self.rerank_model_name and CrossEncoder is not None:
+                device = (os.environ.get("LOKUMAI_EMBED_DEVICE") or "").strip().lower() or "cpu"
+                try:
+                    self.cross_encoder = CrossEncoder(self.rerank_model_name, device=device)
+                except Exception as e:
+                    print(f"Warning: Failed to load cross-encoder {self.rerank_model_name}: {e}")
+                    self.cross_encoder = None
+
         try:
             self._set_last_error("")
             query_vector = self.embedding_model.encode([query_text])
             query_vector = np.array(query_vector).astype("float32")
+            
+            rerank_active = getattr(self, "cross_encoder", None) is not None
+            if rerank_active:
+                rerank_mult = getattr(self, "rerank_multiplier", 1)
+                top_n = max(k, int(k * rerank_mult))
+                # When reranking, we might want to fetch more from FAISS initially
+                # fetch_k already multiplies by fetch_multiplier, so we have plenty
+            
             fetch_k = self._fetch_k(int(k))
             distances, indices = self.index.search(query_vector, int(fetch_k))
 
@@ -261,8 +286,28 @@ class RAGReaderEngine:
                 if int(idx) < len(self.chunk_meta) and isinstance(self.chunk_meta[int(idx)], dict):
                     src = dict(self.chunk_meta[int(idx)])
                 sources.append(src)
-                if len(results) >= int(k):
-                    break
+                
+                # If reranking, gather up to top_n candidates, else gather up to k
+                if rerank_active:
+                    if len(results) >= top_n:
+                        break
+                else:
+                    if len(results) >= int(k):
+                        break
+
+            if rerank_active and len(results) > 0:
+                pairs = [[query_text, chunk] for chunk in results]
+                scores = self.cross_encoder.predict(pairs)
+                
+                # Sort by score descending
+                scored_results = list(zip(scores, results, dists, sources))
+                scored_results.sort(key=lambda x: x[0], reverse=True)
+                
+                # Take top k
+                scored_results = scored_results[:int(k)]
+                results = [x[1] for x in scored_results]
+                dists = [float(x[2]) for x in scored_results] # Keep original FAISS distance or maybe score? We'll keep original FAISS dists for consistency, but sorted.
+                sources = [x[3] for x in scored_results]
 
             return {
                 "context": "\n\n---\n\n".join(results),
