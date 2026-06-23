@@ -181,6 +181,21 @@ class RAGReaderEngine:
                 self.chunk_meta = []
         self._load_state()
 
+        # check embedding model compatibility
+        if os.path.isfile(self.meta_path):
+            try:
+                import json
+                with open(self.meta_path, "r", encoding="utf-8") as f:
+                    meta = json.load(f) or {}
+                stored_model = meta.get("model")
+                embed_model_name = str(self.quality_profile.embedding_model)
+                if stored_model and stored_model != embed_model_name:
+                    raise ValueError(f"Embedding model mismatch: stored store uses '{stored_model}', but engine initialized with '{embed_model_name}'.")
+            except ValueError:
+                raise
+            except Exception:
+                pass
+
         # faiss index (required for retrieval)
         if not HAS_FAISS:
             self.enabled = False
