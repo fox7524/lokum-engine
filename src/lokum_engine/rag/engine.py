@@ -238,6 +238,8 @@ class RAGEngine:
         if not embed_model_name:
             embed_model_name = str(getattr(self, "quality_profile", None).embedding_model)
 
+        self.embed_model_name = embed_model_name
+
         try:
             self.embedding_model = SentenceTransformer(embed_model_name, device=self.embed_device)
         except TypeError:
@@ -502,6 +504,11 @@ class RAGEngine:
                 with open(self.meta_path, "r", encoding="utf-8") as f:
                     meta = json.load(f) or {}
                 meta_folder = str(meta.get("folder") or "").strip()
+                stored_model = meta.get("model")
+                if stored_model and hasattr(self, "embed_model_name") and stored_model != self.embed_model_name:
+                    raise ValueError(f"Embedding model mismatch: stored store uses '{stored_model}', but engine initialized with '{self.embed_model_name}'.")
+        except ValueError:
+            raise
         except Exception:
             meta_folder = ""
 
@@ -527,7 +534,12 @@ class RAGEngine:
                 self._atomic_write_npy(self.docs_path, np.array(self.documents, dtype=object))
                 if self.chunk_meta:
                     self._atomic_write_npy(self.chunks_meta_path, np.array(self.chunk_meta, dtype=object))
-                self._atomic_write_json(self.meta_path, {"folder": self.indexed_folder})
+                
+                meta_obj = {"folder": self.indexed_folder}
+                if hasattr(self, "embed_model_name"):
+                    meta_obj["model"] = self.embed_model_name
+                self._atomic_write_json(self.meta_path, meta_obj)
+                
                 if isinstance(self.state, dict):
                     self._atomic_write_json(self.state_path, self.state)
             except Exception as e:
@@ -1220,11 +1232,20 @@ class RAGEngine:
         added_total = 0
         batch_size = 2000
 
+        found_fids = set()
+
         def flush():
             nonlocal batch, added_total
             if not batch:
                 return
-            added_total += int(self._ingest_paths(batch, save_on_checkpoint=True))
+            try:
+                added_total += int(self._ingest_paths(batch, save_on_checkpoint=True))
+            except RuntimeError as e:
+                # If no content extracted because files are already up-to-date, that's fine
+                if "No content extracted" not in str(e):
+                    raise
+            except Exception:
+                raise
             batch = []
 
         self._check_abort()
@@ -1237,7 +1258,9 @@ class RAGEngine:
                     if ext not in exts:
                         continue
                     seen += 1
-                    batch.append(os.path.join(root, fn))
+                    p = os.path.join(root, fn)
+                    found_fids.add(self._file_id_for(p))
+                    batch.append(p)
                     if len(batch) >= batch_size:
                         flush()
         else:
@@ -1251,6 +1274,7 @@ class RAGEngine:
                     if ext not in exts:
                         continue
                     seen += 1
+                    found_fids.add(self._file_id_for(p))
                     batch.append(p)
                     if len(batch) >= batch_size:
                         flush()
@@ -1258,6 +1282,27 @@ class RAGEngine:
                 pass
 
         flush()
+        
+        # Reconcile deleted files
+        if isinstance(self.state, dict) and isinstance(self.state.get("files"), dict):
+            dirty = False
+            for fid, rec in self.state["files"].items():
+                if not isinstance(rec, dict):
+                    continue
+                src = rec.get("source_path")
+                if not src or not src.startswith(folder_abs):
+                    continue
+                if not rec.get("deleted") and fid not in found_fids:
+                    rec["deleted"] = True
+                    rec["deleted_at"] = time.time()
+                    dirty = True
+            
+            if dirty:
+                try:
+                    self._atomic_write_json(self.state_path, self.state)
+                except Exception as e:
+                    logger.exception("Failed to save state after reconciling deleted files")
+
         print(f"[RAG] Found {seen} supported files in {folder_abs}")
         return bool(added_total > 0)
 
