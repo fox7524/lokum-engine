@@ -3,11 +3,42 @@ import os
 import shutil
 import tempfile
 import numpy as np
+from unittest.mock import patch, MagicMock
+
+# Patch them before importing RAGEngine
+import sys
+from unittest.mock import MagicMock
+sys.modules['sentence_transformers'] = MagicMock()
+sys.modules['sentence_transformers.CrossEncoder'] = MagicMock()
 
 from lokum_engine.rag.engine import RAGEngine
 
 class TestRagReranking(unittest.TestCase):
     def setUp(self):
+        # Patch device detection to return CPU so torch doesn't try to load MPS drivers
+        self.device_patcher = patch('lokum_engine.rag.engine.RAGEngine._select_embed_device', return_value='cpu')
+        self.device_patcher.start()
+        
+        self.mock_st = MagicMock()
+        def mock_encode(texts, **kwargs):
+            rng = np.random.RandomState(42)
+            if isinstance(texts, str):
+                return rng.rand(1, 384).astype(np.float32)
+            elif hasattr(texts, "__len__"):
+                n = len(texts)
+                if n == 0:
+                    return np.array([]).astype(np.float32)
+                return rng.rand(n, 384).astype(np.float32)
+            else:
+                return rng.rand(1, 384).astype(np.float32)
+        self.mock_st.encode.side_effect = mock_encode
+
+        self.mock_ce = MagicMock()
+        
+        # Ensure that when SentenceTransformer(...) or CrossEncoder(...) is called, they return our mocks
+        sys.modules['sentence_transformers'].SentenceTransformer.return_value = self.mock_st
+        sys.modules['sentence_transformers'].CrossEncoder.return_value = self.mock_ce
+
         self.temp_dir = tempfile.mkdtemp()
         # Initialize an engine with a small model and reranker
         self.engine = RAGEngine(storage_dir=self.temp_dir, quality="mid")
@@ -33,8 +64,14 @@ class TestRagReranking(unittest.TestCase):
             
     def tearDown(self):
         shutil.rmtree(self.temp_dir, ignore_errors=True)
+        self.device_patcher.stop()
         
     def test_reranking_changes_order(self):
+        """Test that CrossEncoder scoring reorders the raw FAISS distances."""
+        # Force the mock cross encoder to return specific scores
+        # We will feed it 2 documents. We want it to score the second doc much higher.
+        self.mock_ce.predict.return_value = np.array([-10.0, 10.0], dtype=np.float32)
+
         # Ingest documents
         self.engine.ingest_documents(self.test_files)
         

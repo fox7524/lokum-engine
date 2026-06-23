@@ -983,9 +983,17 @@ class RAGEngine:
         def encode_batch(texts: List[str]):
             try:
                 bs = getattr(self, "embed_batch_size", 32)
-                return self.embedding_model.encode(texts, batch_size=int(bs), show_progress_bar=False)
+                res = self.embedding_model.encode(texts, batch_size=int(bs), show_progress_bar=False)
             except TypeError:
-                return self.embedding_model.encode(texts)
+                res = self.embedding_model.encode(texts)
+                
+            if isinstance(res, list):
+                res = np.array(res).astype("float32")
+            if isinstance(res, np.ndarray) and res.ndim == 1:
+                # If we passed a single text, it might return shape (384,)
+                # We need shape (1, 384) to match len(batch)
+                res = res.reshape(1, -1)
+            return res
 
         def should_index(rec: Any, path: str, size: int, mtime: float) -> bool:
             if not isinstance(rec, dict):
@@ -1091,7 +1099,7 @@ class RAGEngine:
                         emb = encode_batch(batch)
                         emb = np.array(emb).astype("float32")
                         if emb.ndim != 2 or emb.shape[0] != len(batch):
-                            raise RuntimeError("Embedding model returned invalid shape.")
+                            raise RuntimeError(f"Embedding model returned invalid shape. Expected ({len(batch)}, dim), got {emb.shape}")
                         if dim is None:
                             dim = int(emb.shape[1])
                         if self.index is None:
