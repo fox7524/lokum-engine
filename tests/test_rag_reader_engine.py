@@ -118,6 +118,41 @@ class TestRagReaderEngine(unittest.TestCase):
 
             self.assertEqual(result["chunks"], [active_text])
 
+    def test_embedding_model_mismatch_raises_error(self):
+        if not getattr(reader_engine, "HAS_FAISS", False):
+            self.skipTest("faiss not available")
+            
+        with tempfile.TemporaryDirectory() as td:
+            docs_path = os.path.join(td, "docs_metadata.npy")
+            index_path = os.path.join(td, "faiss_index.bin")
+            meta_path = os.path.join(td, "rag_meta.json")
+            
+            np.save(docs_path, np.array(["chunk1"], dtype=object))
+            index = reader_engine.faiss.IndexFlatL2(3)
+            index.add(np.array([[1.0, 0.0, 1.0]], dtype="float32"))
+            reader_engine.faiss.write_index(index, index_path)
+            
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump({"folder": "/tmp/test", "model": "model-A"}, f)
+                
+            eng = RAGReaderEngine(storage_dir=td, quality="mid")
+            # Override to make sure it thinks we are initializing with model-B
+            eng.quality_profile = reader_engine.get_rag_quality_profile("mid")
+            
+            from lokum_engine.rag.engine import RAGQualityProfile
+            eng.quality_profile = RAGQualityProfile(
+                name="test",
+                chunk_size=700,
+                overlap=80,
+                embedding_model="model-B",
+                fetch_multiplier=6,
+                fetch_min=30,
+                fetch_cap=200,
+            )
+            
+            with self.assertRaisesRegex(ValueError, "Embedding model mismatch"):
+                eng.load()
 
 if __name__ == "__main__":
+
     unittest.main()

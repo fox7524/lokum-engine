@@ -40,6 +40,7 @@ class TestRagPersistence(unittest.TestCase):
         eng.staging_dir = os.path.join(eng.storage_dir, "staging")
         os.makedirs(eng.staging_dir, exist_ok=True)
         eng.indexed_folder = ""
+        eng.embed_model_name = "test-model-A"
         eng.state = {"version": 1, "files": {}}
         return eng
 
@@ -120,3 +121,58 @@ class TestRagPersistence(unittest.TestCase):
 
             self.assertIn(new_text, result["chunks"])
             self.assertNotIn(old_text, result["chunks"])
+
+    def test_ingest_folder_marks_missing_files_as_deleted(self):
+        if not getattr(rag_engine, "HAS_FAISS", False):
+            self.skipTest("faiss not available")
+
+        with tempfile.TemporaryDirectory() as td:
+            eng = self._make_engine(td)
+            src_dir = os.path.join(td, "src")
+            os.makedirs(src_dir, exist_ok=True)
+            
+            p1 = os.path.join(src_dir, "a.txt")
+            p2 = os.path.join(src_dir, "b.txt")
+            
+            with open(p1, "w", encoding="utf-8") as f:
+                f.write("AAA")
+            with open(p2, "w", encoding="utf-8") as f:
+                f.write("BBB")
+                
+            eng.ingest_folder(src_dir, recursive=True)
+            
+            fid1 = eng._file_id_for(p1)
+            fid2 = eng._file_id_for(p2)
+            
+            # Initially, neither is marked deleted
+            self.assertFalse(eng.state["files"][fid1].get("deleted", False))
+            self.assertFalse(eng.state["files"][fid2].get("deleted", False))
+            
+            # Delete b.txt from disk
+            os.remove(p2)
+            
+            # Re-ingest folder
+            eng.ingest_folder(src_dir, recursive=True)
+            
+            # a.txt is still not deleted, b.txt should now be marked deleted
+            self.assertFalse(eng.state["files"][fid1].get("deleted", False))
+            self.assertTrue(eng.state["files"][fid2].get("deleted", False))
+
+    def test_embedding_model_mismatch_raises_error(self):
+        if not getattr(rag_engine, "HAS_FAISS", False):
+            self.skipTest("faiss not available")
+
+        with tempfile.TemporaryDirectory() as td:
+            eng1 = self._make_engine(td)
+            eng1.embed_model_name = "model-A"
+            eng1.documents = ["chunk1"]
+            eng1.index = rag_engine.faiss.IndexFlatL2(3)
+            eng1.save_index()
+            
+            eng2 = self._make_engine(td)
+            eng2.embed_model_name = "model-B"
+            
+            with self.assertRaisesRegex(ValueError, "Embedding model mismatch"):
+                eng2.load_index()
+
+

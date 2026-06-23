@@ -13,6 +13,7 @@ training samples from being sliced in the middle of ChatML tags.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -22,6 +23,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict
 from typing import List
+
+logger = logging.getLogger(__name__)
 
 
 def _validate_jsonl_dataset_file(fp: str, *, label: str) -> None:
@@ -183,19 +186,21 @@ def _presplit_text(text: str, max_seq_length: int, batch_size: int) -> list[str]
     return [s for s in out2 if s.strip()]
 
 
-def _presplit_jsonl_file(fp: str, max_seq_length: int, batch_size: int) -> int:
+def _presplit_jsonl_file(fp: str, max_seq_length: int, batch_size: int, strict: bool = False) -> int:
     if not fp or not os.path.isfile(fp):
         return 0
     changed = 0
     out_lines: list[str] = []
     with open(fp, "r", encoding="utf-8") as f:
-        for ln in f.read().splitlines():
+        for lineno, ln in enumerate(f.read().splitlines(), start=1):
             s = (ln or "").strip()
             if not s:
                 continue
             try:
                 obj = json.loads(s)
-            except Exception:
+            except Exception as e:
+                if strict:
+                    raise RuntimeError(f"Malformed JSONL at {fp}:{lineno}") from e
                 obj = {"text": s}
             if not isinstance(obj, dict) or "text" not in obj:
                 out_lines.append(json.dumps(obj, ensure_ascii=False))
@@ -497,12 +502,12 @@ class FinetuneEngine:
         eval_dir = os.path.abspath(os.path.join(base, "validate_only", f"run_{ts}"))
         os.makedirs(eval_dir, exist_ok=True)
         shutil.copyfile(valid_fp, os.path.join(eval_dir, "test.jsonl"))
-        try:
-            if os.environ.get("LOKUMAI_FT_PRESPLIT", "1") != "0":
-                max_seq = int(os.environ.get("LOKUMAI_FT_MAX_SEQ_LENGTH", "512").strip() or "512")
-                _presplit_jsonl_file(os.path.join(eval_dir, "test.jsonl"), max_seq, 1)
-        except Exception:
-            pass
+        if os.environ.get("LOKUMAI_FT_PRESPLIT", "1") != "0":
+            max_seq = int(os.environ.get("LOKUMAI_FT_MAX_SEQ_LENGTH", "512").strip() or "512")
+            try:
+                _presplit_jsonl_file(os.path.join(eval_dir, "test.jsonl"), max_seq, 1, strict=True)
+            except Exception as e:
+                raise RuntimeError(str(e)) from e
 
         cmd = [sys.executable, "-m", "mlx_lm", "lora", "--model", self.model_path, "--data", eval_dir, "--test"]
         prof = getattr(self, "quality_profile", FINETUNE_QUALITY_PROFILES["mid"])
