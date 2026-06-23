@@ -95,3 +95,28 @@ class TestRagPersistence(unittest.TestCase):
             self.assertTrue(any("AAA" in c for c in eng.documents))
             self.assertTrue(any("BBB" in c for c in eng.documents))
 
+    def test_reingest_modified_file_hides_superseded_chunks(self):
+        if not getattr(rag_engine, "HAS_FAISS", False):
+            self.skipTest("faiss not available")
+
+        with tempfile.TemporaryDirectory() as td:
+            eng = self._make_engine(td)
+            src_dir = os.path.join(td, "src")
+            os.makedirs(src_dir, exist_ok=True)
+            p = os.path.join(src_dir, "a.txt")
+
+            old_text = "O" * 300
+            new_text = "N" * 30
+
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(old_text)
+            self.assertTrue(eng.ingest_documents([p]))
+
+            with open(p, "w", encoding="utf-8") as f:
+                f.write(new_text)
+            self.assertTrue(eng.ingest_documents([p]))
+
+            result = eng.query_with_sources("Q" * 30, k=5)
+
+            self.assertIn(new_text, result["chunks"])
+            self.assertNotIn(old_text, result["chunks"])

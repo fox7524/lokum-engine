@@ -14,6 +14,7 @@ from __future__ import annotations
 import glob
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -89,6 +90,8 @@ DEFAULT_META_NAME = "rag_meta.json"
 DEFAULT_CHUNKS_META_NAME = "chunks_meta.npy"
 DEFAULT_STATE_NAME = "rag_state.json"
 DEFAULT_STAGING_DIRNAME = "staging"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -342,8 +345,10 @@ class RAGEngine:
         rec["deleted_at"] = time.time() if deleted else None
         try:
             self._atomic_write_json(self.state_path, self.state)
-        except Exception:
-            pass
+        except Exception as e:
+            self._set_last_error(str(e))
+            logger.exception("Failed to persist deleted state")
+            return False
         return True
 
     def _is_file_deleted(self, file_id: str) -> bool:
@@ -353,6 +358,34 @@ class RAGEngine:
             return bool(isinstance(rec, dict) and rec.get("deleted"))
         except Exception:
             return False
+
+    def _set_chunk_range_active(self, start: int, end: int, active: bool) -> None:
+        try:
+            start_i = max(0, int(start))
+            end_i = min(len(self.chunk_meta), int(end))
+        except Exception:
+            return
+        if end_i <= start_i:
+            return
+        for idx in range(start_i, end_i):
+            meta = self.chunk_meta[idx] if idx < len(self.chunk_meta) else None
+            if isinstance(meta, dict):
+                meta["active"] = bool(active)
+            else:
+                self.chunk_meta[idx] = {"active": bool(active)}
+
+    def _is_chunk_searchable(self, idx: int) -> bool:
+        if idx < 0 or idx >= len(self.documents):
+            return False
+        if idx < len(self.chunk_meta):
+            meta = self.chunk_meta[idx]
+            if isinstance(meta, dict):
+                if meta.get("active") is False:
+                    return False
+                fid = meta.get("file_id")
+                if isinstance(fid, str) and fid and self._is_file_deleted(fid):
+                    return False
+        return True
 
     def _set_last_error(self, msg: str) -> None:
         try:
@@ -489,19 +522,18 @@ class RAGEngine:
 
     def save_index(self) -> None:
         if self.index is not None:
-            self._atomic_write_faiss(self.index_path, self.index)
-            self._atomic_write_npy(self.docs_path, np.array(self.documents, dtype=object))
-            if self.chunk_meta:
-                self._atomic_write_npy(self.chunks_meta_path, np.array(self.chunk_meta, dtype=object))
             try:
+                self._atomic_write_faiss(self.index_path, self.index)
+                self._atomic_write_npy(self.docs_path, np.array(self.documents, dtype=object))
+                if self.chunk_meta:
+                    self._atomic_write_npy(self.chunks_meta_path, np.array(self.chunk_meta, dtype=object))
                 self._atomic_write_json(self.meta_path, {"folder": self.indexed_folder})
-            except Exception:
-                pass
-            try:
                 if isinstance(self.state, dict):
                     self._atomic_write_json(self.state_path, self.state)
-            except Exception:
-                pass
+            except Exception as e:
+                self._set_last_error(str(e))
+                logger.exception("Failed to save RAG index")
+                raise RuntimeError(str(e)) from e
             print(f"[RAG] Saved {len(self.documents)} chunks to index.")
 
     def chunk_text(self, text: str, chunk_size: int | None = None, overlap: int | None = None) -> List[str]:
@@ -957,8 +989,7 @@ class RAGEngine:
             except TypeError:
                 return self.embedding_model.encode(texts)
 
-        def should_index(path: str, fid: str) -> bool:
-            rec = (self.state.get("files") or {}).get(fid) if isinstance(self.state, dict) else None
+        def should_index(rec: Any, path: str, size: int, mtime: float) -> bool:
             if not isinstance(rec, dict):
                 return True
             if rec.get("deleted"):
@@ -966,15 +997,11 @@ class RAGEngine:
             if rec.get("status") != "ok":
                 return True
             try:
-                st = os.stat(path)
-            except Exception:
-                return False
-            try:
                 prev_size = int(rec.get("size", -1))
                 prev_mtime = float(rec.get("mtime", -1))
             except Exception:
                 return True
-            if prev_size == int(st.st_size) and prev_mtime == float(st.st_mtime):
+            if prev_size == int(size) and prev_mtime == float(mtime):
                 return False
             return True
 
@@ -1000,21 +1027,30 @@ class RAGEngine:
                     size = -1
                     mtime = -1.0
 
+                rec = None
+                prev_chunk_start = None
+                prev_chunk_end = None
                 if isinstance(self.state, dict) and isinstance(self.state.get("files"), dict):
                     rec = self.state["files"].get(fid)
                     if not isinstance(rec, dict):
                         rec = {}
                         self.state["files"][fid] = rec
+
+                    prev_chunk_start = rec.get("chunk_start")
+                    prev_chunk_end = rec.get("chunk_end")
+                    needs_index = should_index(rec, p, size, mtime) if size >= 0 else False
                     rec["source_path"] = p
                     rec["last_seen_at"] = time.time()
                     if size >= 0:
                         rec["size"] = size
                     if mtime >= 0:
                         rec["mtime"] = mtime
+                else:
+                    needs_index = True
 
                 if size < 0:
                     continue
-                if not should_index(p, fid):
+                if not needs_index:
                     continue
 
                 chunks = self.process_file(p)
@@ -1076,6 +1112,8 @@ class RAGEngine:
                         if not isinstance(rec, dict):
                             rec = {}
                             self.state["files"][fid] = rec
+                        if prev_chunk_start is not None and prev_chunk_end is not None:
+                            self._set_chunk_range_active(prev_chunk_start, prev_chunk_end, False)
                         rec["status"] = "ok"
                         rec["deleted"] = False
                         rec["indexed_at"] = time.time()
@@ -1237,6 +1275,7 @@ class RAGEngine:
             return ""
 
         try:
+            self._set_last_error("")
             self._check_abort()
             query_vector = self.embedding_model.encode([query_text])
             query_vector = np.array(query_vector).astype("float32")
@@ -1247,16 +1286,11 @@ class RAGEngine:
 
             results = []
             for idx in indices[0]:
-                if idx != -1 and idx < len(self.documents):
-                    if idx < len(self.chunk_meta):
-                        meta = self.chunk_meta[idx]
-                        if isinstance(meta, dict):
-                            fid = meta.get("file_id")
-                            if isinstance(fid, str) and fid and self._is_file_deleted(fid):
-                                continue
-                    results.append(self.documents[idx])
-                    if len(results) >= int(k):
-                        break
+                if idx == -1 or not self._is_chunk_searchable(int(idx)):
+                    continue
+                results.append(self.documents[int(idx)])
+                if len(results) >= int(k):
+                    break
 
             if not results:
                 return ""
@@ -1269,14 +1303,16 @@ class RAGEngine:
                 except Exception:
                     pass
                 return ""
-            print(f"[RAG] Query error: {e}")
+            self._set_last_error(str(e))
+            logger.exception("RAG query failed")
             return ""
 
     def query_with_sources(self, query_text: str, k: int = 3) -> Dict[str, Any]:
         if not self.enabled or self.index is None:
-            return {"context": "", "chunks": [], "distances": [], "sources": [], "count": 0}
+            return {"context": "", "chunks": [], "distances": [], "sources": [], "count": 0, "error": ""}
 
         try:
+            self._set_last_error("")
             self._check_abort()
             query_vector = self.embedding_model.encode([query_text])
             query_vector = np.array(query_vector).astype("float32")
@@ -1290,22 +1326,18 @@ class RAGEngine:
             sources = []
 
             for idx, dist in zip(indices[0], distances[0]):
-                if idx != -1 and idx < len(self.documents):
-                    results.append(self.documents[idx])
-                    dists.append(float(dist))
-                    src = {}
-                    if idx < len(self.chunk_meta):
-                        meta = self.chunk_meta[idx]
-                        if isinstance(meta, dict):
-                            src = dict(meta)
-                    fid = src.get("file_id") if isinstance(src, dict) else None
-                    if isinstance(fid, str) and fid and self._is_file_deleted(fid):
-                        results.pop()
-                        dists.pop()
-                        continue
-                    sources.append(src)
-                    if len(results) >= int(k):
-                        break
+                if idx == -1 or not self._is_chunk_searchable(int(idx)):
+                    continue
+                results.append(self.documents[int(idx)])
+                dists.append(float(dist))
+                src = {}
+                if int(idx) < len(self.chunk_meta):
+                    meta = self.chunk_meta[int(idx)]
+                    if isinstance(meta, dict):
+                        src = dict(meta)
+                sources.append(src)
+                if len(results) >= int(k):
+                    break
 
             return {
                 "context": "\n\n---\n\n".join(results),
@@ -1313,6 +1345,7 @@ class RAGEngine:
                 "distances": dists,
                 "sources": sources,
                 "count": len(results),
+                "error": "",
             }
         except Exception as e:
             if "aborted" in str(e).lower():
@@ -1321,9 +1354,24 @@ class RAGEngine:
                     self.clear_abort()
                 except Exception:
                     pass
-                return {"context": "", "chunks": [], "distances": [], "sources": [], "count": 0}
-            print(f"[RAG] Query error: {e}")
-            return {"context": "", "chunks": [], "distances": [], "sources": [], "count": 0}
+                return {
+                    "context": "",
+                    "chunks": [],
+                    "distances": [],
+                    "sources": [],
+                    "count": 0,
+                    "error": self.last_error,
+                }
+            self._set_last_error(str(e))
+            logger.exception("RAG query_with_sources failed")
+            return {
+                "context": "",
+                "chunks": [],
+                "distances": [],
+                "sources": [],
+                "count": 0,
+                "error": self.last_error,
+            }
 
     def get_stats(self) -> Dict[str, Any]:
         if self.index is None:

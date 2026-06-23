@@ -1,5 +1,6 @@
 import os
 import unittest
+from pathlib import Path
 
 from lokum_engine.paths import lokumai_home, lora_dir, models_dir, rag_dir
 
@@ -15,8 +16,8 @@ class TestPaths(unittest.TestCase):
 
     def test_overrides(self):
         os.environ["LOKUMAI_HOME"] = "/tmp/lokumai_home_test"
-        self.assertEqual(str(lokumai_home()), "/tmp/lokumai_home_test")
-        self.assertEqual(str(rag_dir()), "/tmp/lokumai_home_test/rag")
-        self.assertEqual(str(lora_dir()), "/tmp/lokumai_home_test/lora_data")
-        self.assertEqual(str(models_dir()), "/tmp/lokumai_home_test/models")
-
+        expected_home = str(Path("/tmp/lokumai_home_test").expanduser().resolve())
+        self.assertEqual(str(lokumai_home()), expected_home)
+        self.assertEqual(str(rag_dir()), str((Path(expected_home) / "rag").resolve()))
+        self.assertEqual(str(lora_dir()), str((Path(expected_home) / "lora_data").resolve()))
+        self.assertEqual(str(models_dir()), str((Path(expected_home) / "models").resolve()))

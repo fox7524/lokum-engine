@@ -24,6 +24,34 @@ from typing import Any, Dict
 from typing import List
 
 
+def _validate_jsonl_dataset_file(fp: str, *, label: str) -> None:
+    if not os.path.isfile(fp):
+        raise RuntimeError(f"{label} not found: {fp}")
+
+    rows = 0
+    with open(fp, "r", encoding="utf-8") as f:
+        for lineno, ln in enumerate(f, start=1):
+            s = (ln or "").strip()
+            if not s:
+                continue
+            obj = json.loads(s)
+            if not isinstance(obj, dict) or "text" not in obj or not str(obj.get("text") or "").strip():
+                raise RuntimeError(f"{label} has invalid row {lineno}: missing text")
+            rows += 1
+
+    if rows == 0:
+        raise RuntimeError(f"{label} is empty: {fp}")
+
+
+def _validate_training_dataset_dir(data_dir: str) -> None:
+    abs_dir = os.path.abspath(data_dir)
+    if not os.path.isdir(abs_dir):
+        raise RuntimeError(f"dataset directory not found: {abs_dir}")
+
+    _validate_jsonl_dataset_file(os.path.join(abs_dir, "train.jsonl"), label="train.jsonl")
+    _validate_jsonl_dataset_file(os.path.join(abs_dir, "valid.jsonl"), label="valid.jsonl")
+
+
 def _presplit_text(text: str, max_seq_length: int, batch_size: int) -> list[str]:
     """
     Split overly-long samples into multiple smaller samples to avoid OOM.
@@ -384,6 +412,7 @@ class FinetuneEngine:
         """Starts the MLX LoRA training loop as a non-blocking subprocess."""
 
         data_dir = dataset_path if dataset_path else self.dataset_dir
+        _validate_training_dataset_dir(data_dir)
         prof = getattr(self, "quality_profile", FINETUNE_QUALITY_PROFILES["mid"])
         eff_batch = int(batch_size) if batch_size is not None else int(prof.batch_size)
         eff_layers = int(num_layers) if num_layers is not None else int(prof.num_layers)
