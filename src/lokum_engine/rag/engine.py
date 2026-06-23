@@ -91,6 +91,22 @@ DEFAULT_CHUNKS_META_NAME = "chunks_meta.npy"
 DEFAULT_STATE_NAME = "rag_state.json"
 DEFAULT_STAGING_DIRNAME = "staging"
 
+SUPPORTED_CODE_EXTENSIONS = {
+    ".py", ".cpp", ".c", ".h", ".hpp", ".js", ".ts", ".html", ".htm",
+    ".css", ".scss", ".sass", ".less", ".txt", ".md", ".markdown",
+    ".rst", ".json", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg",
+    ".sh", ".bash", ".zsh", ".csh", ".ps1", ".r", ".java", ".kt",
+    ".swift", ".go", ".rs", ".rb", ".php", ".pl", ".pm", ".lua",
+    ".scala", ".clj", ".ex", ".exs", ".sql", ".graphql", ".gql",
+    ".vim", ".editorconfig", ".gitignore", ".dockerfile", ".makefile", ".cmake",
+    ".ino"
+}
+
+SUPPORTED_EXTENSIONS = {
+    ".pdf", ".docx", ".doc", ".zim", 
+    ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"
+} | SUPPORTED_CODE_EXTENSIONS
+
 logger = logging.getLogger(__name__)
 
 
@@ -912,61 +928,7 @@ class RAGEngine:
                 content = self.extract_from_zim(file_path)
             elif ext in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"]:
                 content = self.extract_from_image(file_path)
-            elif ext in [
-                ".py",
-                ".cpp",
-                ".c",
-                ".h",
-                ".hpp",
-                ".js",
-                ".ts",
-                ".html",
-                ".htm",
-                ".css",
-                ".scss",
-                ".sass",
-                ".less",
-                ".txt",
-                ".md",
-                ".markdown",
-                ".rst",
-                ".json",
-                ".xml",
-                ".yaml",
-                ".yml",
-                ".toml",
-                ".ini",
-                ".cfg",
-                ".sh",
-                ".bash",
-                ".zsh",
-                ".csh",
-                ".ps1",
-                ".r",
-                ".java",
-                ".kt",
-                ".swift",
-                ".go",
-                ".rs",
-                ".rb",
-                ".php",
-                ".pl",
-                ".pm",
-                ".lua",
-                ".scala",
-                ".clj",
-                ".ex",
-                ".exs",
-                ".sql",
-                ".graphql",
-                ".gql",
-                ".vim",
-                ".editorconfig",
-                ".gitignore",
-                ".dockerfile",
-                ".makefile",
-                ".cmake",
-            ]:
+            elif ext in SUPPORTED_CODE_EXTENSIONS:
                 content = self.extract_from_code(file_path)
             else:
                 content = self.extract_from_code(file_path)
@@ -1196,37 +1158,6 @@ class RAGEngine:
         self._load_state()
         self._validate_or_quarantine_existing_store()
 
-        exts = {
-            ".pdf",
-            ".docx",
-            ".doc",
-            ".zim",
-            ".jpg",
-            ".jpeg",
-            ".png",
-            ".webp",
-            ".bmp",
-            ".tif",
-            ".tiff",
-            ".py",
-            ".cpp",
-            ".c",
-            ".h",
-            ".hpp",
-            ".js",
-            ".ts",
-            ".html",
-            ".htm",
-            ".css",
-            ".txt",
-            ".md",
-            ".json",
-            ".xml",
-            ".yaml",
-            ".yml",
-            ".sh",
-            ".ino",
-        }
         batch: List[str] = []
         seen = 0
         added_total = 0
@@ -1255,7 +1186,7 @@ class RAGEngine:
                 for fn in files:
                     self._check_abort()
                     ext = os.path.splitext(fn)[1].lower()
-                    if ext not in exts:
+                    if ext not in SUPPORTED_EXTENSIONS:
                         continue
                     seen += 1
                     p = os.path.join(root, fn)
@@ -1271,7 +1202,7 @@ class RAGEngine:
                     if not os.path.isfile(p):
                         continue
                     ext = os.path.splitext(fn)[1].lower()
-                    if ext not in exts:
+                    if ext not in SUPPORTED_EXTENSIONS:
                         continue
                     seen += 1
                     found_fids.add(self._file_id_for(p))
