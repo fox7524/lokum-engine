@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lokum-engine"
-version = "0.1.2"
+version = "1.0.0"
 description = "LokumAI engines: RAG + MLX LoRA fine-tuning utilities"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -22,6 +22,8 @@ dependencies = [
   "libzim",
   "mlx-lm",
   "huggingface_hub",
+  "rank_bm25",
+  "nltk",
 ]
 
 [project.urls]

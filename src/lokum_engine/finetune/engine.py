@@ -391,6 +391,41 @@ class FinetuneEngine:
 
         return train_path
 
+    def prepare_preference_dataset(self, preference_pairs: List[dict]):
+        """
+        Creates a DPO/ORPO formatted dataset for preference alignment.
+        Each dictionary should have:
+        - 'prompt': The user instruction
+        - 'chosen': The preferred assistant response
+        - 'rejected': The rejected assistant response
+        """
+        train_path = os.path.join(self.dataset_dir, "preference_train.jsonl")
+        valid_path = os.path.join(self.dataset_dir, "preference_valid.jsonl")
+        
+        split_idx = int(len(preference_pairs) * 0.9)
+        train_pairs = preference_pairs[:split_idx]
+        valid_pairs = preference_pairs[split_idx:]
+        
+        if not train_pairs:
+            train_pairs = preference_pairs
+            valid_pairs = preference_pairs[:1]
+            
+        def write_pairs(path, pairs):
+            with open(path, "w", encoding="utf-8") as f:
+                for pair in pairs:
+                    # MLX-LM and standard DPO format expects these keys
+                    formatted = {
+                        "prompt": pair.get("prompt", ""),
+                        "chosen": pair.get("chosen", ""),
+                        "rejected": pair.get("rejected", "")
+                    }
+                    f.write(json.dumps(formatted, ensure_ascii=False) + "\n")
+                    
+        write_pairs(train_path, train_pairs)
+        write_pairs(valid_path, valid_pairs)
+        
+        return train_path, valid_path
+
     def presplit_dataset(self, dataset_path: str, max_seq_length: int, batch_size: int) -> dict:
         data_dir = os.path.abspath(dataset_path or self.dataset_dir)
         train_fp = os.path.join(data_dir, "train.jsonl")
@@ -475,6 +510,12 @@ class FinetuneEngine:
         if config_path:
             cmd += ["--config", str(config_path)]
 
+        env = os.environ.copy()
+        # Suppress MLX / Metal "God-Mode" and IOSurface spam on M-series chips
+        env["MTL_LOG_LEVEL"] = "error"
+        env["MTL_DEBUG_LAYER"] = "0"
+        env["MLX_LOG_LEVEL"] = "error"
+
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -482,6 +523,7 @@ class FinetuneEngine:
             text=True,
             bufsize=1,
             start_new_session=(sys.platform != "win32"),
+            env=env,
         )
         return process
 
@@ -522,6 +564,11 @@ class FinetuneEngine:
         if config_path:
             cmd += ["--config", str(config_path)]
 
+        env = os.environ.copy()
+        env["MTL_LOG_LEVEL"] = "error"
+        env["MTL_DEBUG_LAYER"] = "0"
+        env["MLX_LOG_LEVEL"] = "error"
+
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -529,5 +576,6 @@ class FinetuneEngine:
             text=True,
             bufsize=1,
             start_new_session=(sys.platform != "win32"),
+            env=env,
         )
         return process

@@ -6,6 +6,7 @@ from functools import partial
 
 from lokum_engine.finetune.engine import FinetuneEngine
 from lokum_engine.finetune.engine import get_finetune_quality_profile, normalize_finetune_quality
+from .curation import deduplicate_dataset, auto_score_dataset
 
 
 def finetune_engine_base(model_path: str) -> FinetuneEngine:
@@ -42,4 +43,6 @@ __all__ = [
     "FinetuneEngineBase",
     "FinetuneEngineMid",
     "FinetuneEngineFab",
+    "deduplicate_dataset",
+    "auto_score_dataset",
 ]

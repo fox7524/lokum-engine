@@ -22,6 +22,20 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+try:
+    from rank_bm25 import BM25Okapi
+    HAS_BM25 = True
+except ImportError:
+    BM25Okapi = None
+    HAS_BM25 = False
+
+try:
+    import nltk
+    HAS_NLTK = True
+except ImportError:
+    nltk = None
+    HAS_NLTK = False
+
 # FAISS for vector similarity search
 try:
     import faiss
@@ -292,6 +306,8 @@ class RAGEngine:
                 self.cross_encoder = None
 
         self.index: Optional[faiss.Index] = None
+        self.bm25_index = None
+        self._bm25_doc_count = 0
         self.documents: List[str] = []
         self.chunk_meta: List[Dict[str, Any]] = []
         self.state: Dict[str, Any] = {"version": 1, "files": {}}
@@ -588,7 +604,7 @@ class RAGEngine:
                 raise RuntimeError(str(e)) from e
             print(f"[RAG] Saved {len(self.documents)} chunks to index.")
 
-    def chunk_text(self, text: str, chunk_size: int | None = None, overlap: int | None = None) -> List[str]:
+    def chunk_text(self, text: str, chunk_size: int | None = None, overlap: int | None = None, semantic: bool = True) -> List[str]:
         s = (text or "").strip()
         if not s:
             return []
@@ -603,6 +619,37 @@ class RAGEngine:
         overlap = max(0, int(overlap))
         if overlap >= chunk_size:
             overlap = max(0, chunk_size // 4)
+
+        if semantic and HAS_NLTK:
+            try:
+                try:
+                    nltk.data.find('tokenizers/punkt_tab')
+                except LookupError:
+                    nltk.download('punkt_tab', quiet=True)
+                
+                sentences = nltk.tokenize.sent_tokenize(s)
+                chunks = []
+                current_chunk = ""
+                
+                for sentence in sentences:
+                    if len(current_chunk) + len(sentence) <= chunk_size:
+                        current_chunk += " " + sentence if current_chunk else sentence
+                    else:
+                        if current_chunk:
+                            chunks.append(current_chunk.strip())
+                        # If a single sentence is larger than chunk_size, split it manually
+                        if len(sentence) > chunk_size:
+                            for i in range(0, len(sentence), chunk_size - overlap):
+                                chunks.append(sentence[i:i+chunk_size].strip())
+                            current_chunk = ""
+                        else:
+                            current_chunk = sentence
+                if current_chunk:
+                    chunks.append(current_chunk.strip())
+                if chunks:
+                    return chunks
+            except Exception as e:
+                logger.warning(f"Semantic chunking failed, falling back to character chunking: {e}")
 
         step = chunk_size - overlap
         if step <= 0:
@@ -1283,6 +1330,16 @@ class RAGEngine:
         print(f"[RAG] Found {seen} supported files in {folder_abs}")
         return bool(added_total > 0)
 
+    def generate_hyde_document(self, query: str, llm_completion_fn=None) -> str:
+        if llm_completion_fn:
+            prompt = f"Please write a passage to answer the question\nQuestion: {query}\nPassage:"
+            try:
+                hypothetical_doc = llm_completion_fn(prompt)
+                return hypothetical_doc
+            except Exception as e:
+                logger.warning(f"HyDE generation failed: {e}")
+        return query
+
     def _fetch_k(self, k: int) -> int:
         mult = int(getattr(self, "fetch_multiplier", 10))
         mn = int(getattr(self, "fetch_min", 50))
@@ -1292,55 +1349,95 @@ class RAGEngine:
             fk = cap
         return fk
 
-    def query(self, query_text: str, k: int = 3) -> str:
-        res = self.query_with_sources(query_text, k)
+    def query(self, query_text: str, k: int = 3, llm_completion_fn=None, use_hyde: bool = False, use_hybrid: bool = True) -> str:
+        res = self.query_with_sources(query_text, k, llm_completion_fn=llm_completion_fn, use_hyde=use_hyde, use_hybrid=use_hybrid)
         return str(res.get("context") or "")
 
-    def query_with_sources(self, query_text: str, k: int = 3) -> Dict[str, Any]:
+    def _ensure_bm25(self):
+        if not HAS_BM25 or not self.documents:
+            return
+        if self.bm25_index is None or self._bm25_doc_count != len(self.documents):
+            tokenized_corpus = [doc.lower().split(" ") for doc in self.documents]
+            self.bm25_index = BM25Okapi(tokenized_corpus)
+            self._bm25_doc_count = len(self.documents)
+
+    def query_with_sources(self, query_text: str, k: int = 3, llm_completion_fn=None, use_hyde: bool = False, use_hybrid: bool = True) -> Dict[str, Any]:
         if not self.enabled or self.index is None:
             return {"context": "", "chunks": [], "distances": [], "sources": [], "count": 0, "error": ""}
 
         try:
             self._set_last_error("")
             self._check_abort()
-            query_vector = self.embedding_model.encode([query_text])
+            
+            search_text = query_text
+            if use_hyde and llm_completion_fn:
+                hyde_doc = self.generate_hyde_document(query_text, llm_completion_fn)
+                search_text = f"{query_text} {hyde_doc}"
+            
+            query_vector = self.embedding_model.encode([search_text])
             query_vector = np.array(query_vector).astype("float32")
-            
-            # Sorgu vektörünü Kosinüs benzerliği için L2 normalize et
             faiss.normalize_L2(query_vector)
-            
             self._check_abort()
 
             rerank_active = getattr(self, "cross_encoder", None) is not None
             if rerank_active:
                 rerank_mult = getattr(self, "rerank_multiplier", 1)
                 top_n = max(k, int(k * rerank_mult))
+            else:
+                top_n = k
 
             fetch_k = self._fetch_k(int(k))
             distances, indices = self.index.search(query_vector, fetch_k)
 
-            results = []
-            dists = []
-            sources = []
-
+            # Retrieve from FAISS
+            faiss_candidates = []
             for idx, dist in zip(indices[0], distances[0]):
                 if idx == -1 or not self._is_chunk_searchable(int(idx)):
                     continue
-                results.append(self.documents[int(idx)])
-                dists.append(float(dist))
+                faiss_candidates.append((int(idx), float(dist)))
+
+            # Retrieve from BM25 if enabled
+            bm25_candidates = []
+            if use_hybrid and HAS_BM25:
+                self._ensure_bm25()
+                if self.bm25_index:
+                    tokenized_query = search_text.lower().split(" ")
+                    bm25_scores = self.bm25_index.get_scores(tokenized_query)
+                    top_bm25_indices = np.argsort(bm25_scores)[::-1][:fetch_k]
+                    for idx in top_bm25_indices:
+                        if bm25_scores[idx] > 0 and self._is_chunk_searchable(int(idx)):
+                            bm25_candidates.append((int(idx), float(bm25_scores[idx])))
+
+            # Combine using Reciprocal Rank Fusion (RRF)
+            fused_scores = {}
+            k_rrf = 60
+            
+            for rank, (idx, _) in enumerate(faiss_candidates):
+                fused_scores[idx] = fused_scores.get(idx, 0.0) + 1.0 / (k_rrf + rank + 1)
+                
+            for rank, (idx, _) in enumerate(bm25_candidates):
+                fused_scores[idx] = fused_scores.get(idx, 0.0) + 1.0 / (k_rrf + rank + 1)
+
+            # Sort combined results
+            sorted_fused = sorted(fused_scores.items(), key=lambda x: x[1], reverse=True)
+            
+            results = []
+            dists = []
+            sources = []
+            
+            for idx, score in sorted_fused:
+                results.append(self.documents[idx])
+                dists.append(score)
                 src = {}
-                if int(idx) < len(self.chunk_meta):
-                    meta = self.chunk_meta[int(idx)]
+                if idx < len(self.chunk_meta):
+                    meta = self.chunk_meta[idx]
                     if isinstance(meta, dict):
                         src = dict(meta)
                 sources.append(src)
-                
-                if rerank_active:
-                    if len(results) >= top_n:
-                        break
-                else:
-                    if len(results) >= int(k):
-                        break
+                if not rerank_active and len(results) >= top_n:
+                    break
+                if rerank_active and len(results) >= top_n * 2: # Keep more for reranking
+                    break
 
             if rerank_active and len(results) > 0:
                 pairs = [[query_text, chunk] for chunk in results]
