@@ -1100,10 +1100,15 @@ class RAGEngine:
                         emb = np.array(emb).astype("float32")
                         if emb.ndim != 2 or emb.shape[0] != len(batch):
                             raise RuntimeError(f"Embedding model returned invalid shape. Expected ({len(batch)}, dim), got {emb.shape}")
+                        
+                        # Kosinüs benzerliği için L2 normalizasyonu (Cosine Similarity)
+                        faiss.normalize_L2(emb)
+                        
                         if dim is None:
                             dim = int(emb.shape[1])
                         if self.index is None:
-                            self.index = faiss.IndexFlatL2(int(dim))
+                            # IndexFlatL2 yerine IndexFlatIP (Inner Product) kullanıyoruz
+                            self.index = faiss.IndexFlatIP(int(dim))
                         self.index.add(emb)
                         self.documents.extend(batch)
                         for _ in batch:
@@ -1158,6 +1163,15 @@ class RAGEngine:
 
             if save_on_checkpoint and pending_save > 0:
                 self.save_index()
+                
+            # Automatically compact the index to remove superseded chunks
+            try:
+                removed = self.compact_index()
+                if removed > 0:
+                    print(f"[RAG] Compacted index: removed {removed} inactive vectors.")
+            except Exception:
+                pass
+                
             return int(added)
         finally:
             try:
@@ -1291,6 +1305,10 @@ class RAGEngine:
             self._check_abort()
             query_vector = self.embedding_model.encode([query_text])
             query_vector = np.array(query_vector).astype("float32")
+            
+            # Sorgu vektörünü Kosinüs benzerliği için L2 normalize et
+            faiss.normalize_L2(query_vector)
+            
             self._check_abort()
 
             rerank_active = getattr(self, "cross_encoder", None) is not None
@@ -1369,6 +1387,95 @@ class RAGEngine:
                 "count": 0,
                 "error": self.last_error,
             }
+
+    def compact_index(self) -> int:
+        """
+        Rebuilds the FAISS index by removing superseded chunks.
+        This keeps the index fresh, reduces memory usage, and improves long-term stability.
+        Returns the number of removed inactive chunks.
+        """
+        if self.index is None or not self.documents or not self.chunk_meta:
+            return 0
+            
+        try:
+            started_at = time.perf_counter()
+            self._check_abort()
+            
+            total_chunks = len(self.documents)
+            dim = int(getattr(self.index, "d"))
+            
+            new_documents = []
+            new_chunk_meta = []
+            active_indices = []
+            
+            # Identify active chunks
+            for idx, meta in enumerate(self.chunk_meta):
+                if isinstance(meta, dict):
+                    fid = meta.get("file_id")
+                    if isinstance(fid, str) and fid and self._is_chunk_searchable(idx):
+                        active_indices.append(idx)
+                        new_documents.append(self.documents[idx])
+                        new_chunk_meta.append(meta)
+            
+            if len(active_indices) == total_chunks:
+                # No compaction needed
+                return 0
+                
+            # Reconstruct the vectors for active chunks
+            new_index = faiss.IndexFlatIP(dim)
+            if active_indices:
+                # Iterate in batches to save memory
+                batch_size = 10000
+                for i in range(0, len(active_indices), batch_size):
+                    batch_idx = active_indices[i:i+batch_size]
+                    vectors = []
+                    for idx in batch_idx:
+                        vec = self.index.reconstruct(int(idx))
+                        vectors.append(vec)
+                    vectors_np = np.array(vectors).astype('float32')
+                    new_index.add(vectors_np)
+            
+            # Replace internal state
+            self.index = new_index
+            self.documents = new_documents
+            self.chunk_meta = new_chunk_meta
+            
+            # Update chunk_start and chunk_end in state
+            # Since we removed chunks, we need to recalculate boundaries for each file
+            files = (self.state or {}).get("files", {})
+            
+            # Group new indices by file_id
+            fid_to_ranges = {}
+            for new_idx, meta in enumerate(self.chunk_meta):
+                fid = meta.get("file_id")
+                if fid not in fid_to_ranges:
+                    fid_to_ranges[fid] = []
+                fid_to_ranges[fid].append(new_idx)
+                
+            for fid, rec in files.items():
+                if not isinstance(rec, dict):
+                    continue
+                if bool(rec.get("deleted")):
+                    continue
+                if fid in fid_to_ranges:
+                    rec["chunk_start"] = min(fid_to_ranges[fid])
+                    rec["chunk_end"] = max(fid_to_ranges[fid]) + 1
+                    rec["chunks"] = rec["chunk_end"] - rec["chunk_start"]
+                else:
+                    rec["chunk_start"] = 0
+                    rec["chunk_end"] = 0
+                    rec["chunks"] = 0
+                    
+            # Save the compacted state
+            self.save_index()
+            removed = total_chunks - len(active_indices)
+            elapsed = time.perf_counter() - started_at
+            print(f"[perf] stage=rag_compact seconds={elapsed:.3f} removed={removed} remaining={len(active_indices)}")
+            return removed
+            
+        except Exception as e:
+            print(f"[RAG] Compaction error: {e}")
+            return 0
 
     def get_stats(self) -> Dict[str, Any]:
         if self.index is None:
