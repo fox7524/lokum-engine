@@ -44,7 +44,7 @@ try:
 except ImportError:
     faiss = None
     HAS_FAISS = False
-    print("Warning: faiss not installed. Run: pip install faiss-cpu")
+    _print_warning("faiss not installed. Run: pip install faiss-cpu")
 
 SentenceTransformer = None
 CrossEncoder = None
@@ -57,7 +57,7 @@ try:
     HAS_PYMUPDF = True
 except ImportError:
     HAS_PYMUPDF = False
-    print("Warning: PyMuPDF not installed. Run: pip install pymupdf")
+    _print_warning("PyMuPDF not installed. Run: pip install pymupdf")
 
 # DOCX processing library - extracts text from Word documents
 try:
@@ -66,7 +66,7 @@ try:
     HAS_DOCX = True
 except ImportError:
     HAS_DOCX = False
-    print("Warning: python-docx not installed. Run: pip install python-docx")
+    _print_warning("python-docx not installed. Run: pip install python-docx")
 
 # Image OCR (optional) - extracts text from images (JPG/PNG/etc.)
 try:
@@ -76,7 +76,7 @@ try:
 except ImportError:
     Image = None
     HAS_PIL = False
-    print("Warning: pillow not installed. Run: pip install pillow")
+    _print_warning("pillow not installed. Run: pip install pillow")
 
 try:
     import pytesseract  # requires system tesseract installed
@@ -85,8 +85,8 @@ try:
 except ImportError:
     pytesseract = None
     HAS_TESSERACT = False
-    print(
-        "Warning: pytesseract not installed. Run: pip install pytesseract (also requires 'tesseract' installed on your OS)"
+    _print_warning(
+        "pytesseract not installed. Run: pip install pytesseract (also requires 'tesseract' installed on your OS)"
     )
 
 try:
@@ -122,7 +122,42 @@ SUPPORTED_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"
 } | SUPPORTED_CODE_EXTENSIONS
 
+
+try:
+    from rich.console import Console
+    from rich.prompt import Prompt, IntPrompt
+    console = Console()
+    RICH_ENABLED = True
+except ImportError:
+    console = None
+    RICH_ENABLED = False
+
+def _print_info(msg: str):
+    if console:
+        console.print(f"[bold cyan]ℹ [RAG][/bold cyan] {msg}")
+    else:
+        _print_info(f"{msg}")
+
+def _print_success(msg: str):
+    if console:
+        console.print(f"[bold green]✓ [RAG][/bold green] {msg}")
+    else:
+        _print_info(f"{msg}")
+
+def _print_warning(msg: str):
+    if console:
+        console.print(f"[bold yellow]⚠ [RAG] Warning:[/bold yellow] {msg}")
+    else:
+        _print_info(f"Warning: {msg}")
+
+def _print_error(msg: str):
+    if console:
+        console.print(f"[bold red]❌ [RAG] Error:[/bold red] {msg}")
+    else:
+        _print_error(f"Error: {msg}")
+
 logger = logging.getLogger(__name__)
+
 
 
 @dataclass(frozen=True)
@@ -187,6 +222,17 @@ RAG_QUALITY_PROFILES: Dict[str, RAGQualityProfile] = {
         rerank_model_name="BAAI/bge-reranker-base",
         rerank_multiplier=4,
     ),
+    "custom": RAGQualityProfile(
+        name="custom",
+        chunk_size=800,
+        overlap=100,
+        embedding_model="all-MiniLM-L6-v2",
+        fetch_multiplier=10,
+        fetch_min=50,
+        fetch_cap=500,
+        rerank_model_name=None,
+        rerank_multiplier=1,
+    ),
 }
 
 
@@ -209,6 +255,8 @@ def normalize_rag_quality(value: str | None) -> str:
         return "mid"
     if v in ("fab", "fabulous", "faboulous", "fabolous", "fabulus", "high", "hq", "best"):
         return "fab"
+    if v in ("custom", "user", "manual"):
+        return "custom"
     # Bilinmeyen değer gelirse: mevcut davranışa en yakın
     return "mid"
 
@@ -229,6 +277,48 @@ class RAGEngine:
     Streamlined (no LangChain).
     """
 
+    def _configure_custom_profile(self):
+        """Interactively configure the custom quality profile."""
+        import sys
+        if not sys.stdout.isatty():
+            _print_warning("Not running in an interactive terminal. Skipping custom profile setup.")
+            return
+            
+        if not console:
+            _print_warning("Rich library not installed, skipping interactive setup. Using default custom values.")
+            return
+            
+        _print_info("Configuring [bold magenta]CUSTOM[/bold magenta] RAG Quality Profile")
+        try:
+            chunk_size = IntPrompt.ask("Enter chunk size (words/tokens)", default=int(self.quality_profile.chunk_size))
+            overlap = IntPrompt.ask("Enter chunk overlap", default=int(self.quality_profile.overlap))
+            embedding_model = Prompt.ask("Enter embedding model name", default=str(self.quality_profile.embedding_model))
+            fetch_multiplier = IntPrompt.ask("Enter fetch multiplier", default=int(self.quality_profile.fetch_multiplier))
+            fetch_min = IntPrompt.ask("Enter minimum chunks to fetch", default=int(self.quality_profile.fetch_min))
+            fetch_cap = IntPrompt.ask("Enter maximum chunks to fetch", default=int(self.quality_profile.fetch_cap))
+            
+            use_rerank = Prompt.ask("Use reranker model? (y/n)", choices=["y", "n"], default="n")
+            rerank_model_name = None
+            rerank_multiplier = 1
+            if use_rerank == "y":
+                rerank_model_name = Prompt.ask("Enter reranker model name", default="cross-encoder/ms-marco-MiniLM-L-6-v2")
+                rerank_multiplier = IntPrompt.ask("Enter rerank multiplier", default=3)
+
+            self.quality_profile = RAGQualityProfile(
+                name="custom",
+                chunk_size=chunk_size,
+                overlap=overlap,
+                embedding_model=embedding_model,
+                fetch_multiplier=fetch_multiplier,
+                fetch_min=fetch_min,
+                fetch_cap=fetch_cap,
+                rerank_model_name=rerank_model_name,
+                rerank_multiplier=rerank_multiplier
+            )
+            _print_success("Custom profile configured successfully!")
+        except Exception as e:
+            _print_error(f"Interactive setup aborted or failed: {e}. Using defaults.")
+
     def __init__(self, storage_dir: str | None = None, quality: str | None = None):
         # Check if we have all required dependencies
         global SentenceTransformer, CrossEncoder, HAS_SENTENCE_TRANSFORMERS
@@ -244,9 +334,7 @@ class RAGEngine:
                 HAS_SENTENCE_TRANSFORMERS = False
                 SentenceTransformer = None
                 CrossEncoder = None
-                print(
-                    f"Warning: sentence-transformers not available ({e}). Install: pip install sentence-transformers"
-                )
+                _print_warning(f"sentence-transformers not available ({e}). Install: pip install sentence-transformers")
 
         self.enabled = bool(HAS_SENTENCE_TRANSFORMERS and HAS_FAISS)
         if not self.enabled:
@@ -255,6 +343,9 @@ class RAGEngine:
         # ---- Quality profile (chunking + retrieval + embedding model selection)
         env_quality = (os.environ.get("LOKUMAI_RAG_QUALITY") or "").strip()
         self.quality_profile = get_rag_quality_profile(quality or env_quality)
+        
+        if self.quality_profile.name == "custom":
+            self._configure_custom_profile()
         # Chunk defaults (chunk_text() args verilmezse bunlar kullanılır)
         self.chunk_size = int(self.quality_profile.chunk_size)
         self.chunk_overlap = int(self.quality_profile.overlap)
@@ -302,7 +393,7 @@ class RAGEngine:
             try:
                 self.cross_encoder = CrossEncoder(self.rerank_model_name, device=self.embed_device)
             except Exception as e:
-                print(f"Warning: Failed to load cross-encoder {self.rerank_model_name}: {e}")
+                _print_warning(f"Failed to load cross-encoder {self.rerank_model_name}: {e}")
                 self.cross_encoder = None
 
         self.index: Optional[faiss.Index] = None
@@ -578,10 +669,10 @@ class RAGEngine:
                     except Exception:
                         self.chunk_meta = []
                 self.indexed_folder = meta_folder
-                print(f"[RAG] Loaded index with {len(self.documents)} chunks.")
+                _print_success(f"Loaded index with {len(self.documents)} chunks.")
             except Exception as e:
                 self._quarantine_store_files(f"load_index failed: {e}")
-                print(f"[RAG] Error loading index: {e}")
+                _print_error(f"loading index: {e}")
 
     def save_index(self) -> None:
         if self.index is not None:
@@ -602,7 +693,7 @@ class RAGEngine:
                 self._set_last_error(str(e))
                 logger.exception("Failed to save RAG index")
                 raise RuntimeError(str(e)) from e
-            print(f"[RAG] Saved {len(self.documents)} chunks to index.")
+            _print_success(f"Saved {len(self.documents)} chunks to index.")
 
     def chunk_text(self, text: str, chunk_size: int | None = None, overlap: int | None = None, semantic: bool = True) -> List[str]:
         s = (text or "").strip()
@@ -673,7 +764,7 @@ class RAGEngine:
             doc.close()
             return "\n\n--- Page Break ---\n\n".join(text_parts)
         except Exception as e:
-            print(f"[RAG] PDF extraction error for {file_path}: {e}")
+            _print_error(f"PDF extraction error for {file_path}: {e}")
             return ""
 
     def extract_from_docx(self, file_path: str) -> str:
@@ -688,7 +779,7 @@ class RAGEngine:
                     paragraphs.append(text)
             return "\n\n".join(paragraphs)
         except Exception as e:
-            print(f"[RAG] DOCX extraction error for {file_path}: {e}")
+            _print_error(f"DOCX extraction error for {file_path}: {e}")
             return ""
 
     def extract_from_zim(self, file_path: str) -> str:
@@ -956,7 +1047,7 @@ class RAGEngine:
             return ""
         except Exception as e:
             self._set_last_error(f"ZIM extraction error: {e}")
-            print(f"[RAG] ZIM extraction error for {file_path}: {e}")
+            _print_error(f"ZIM extraction error for {file_path}: {e}")
             return ""
 
     def extract_from_image(self, file_path: str) -> str:
@@ -967,7 +1058,7 @@ class RAGEngine:
             txt = pytesseract.image_to_string(img)
             return (txt or "").strip()
         except Exception as e:
-            print(f"[RAG] Image OCR error for {file_path}: {e}")
+            _print_error(f"Image OCR error for {file_path}: {e}")
             return ""
 
     def extract_from_code(self, file_path: str) -> str:
@@ -978,10 +1069,10 @@ class RAGEngine:
                         return f.read()
                 except UnicodeDecodeError:
                     continue
-            print(f"[RAG] Could not decode file: {file_path}")
+            _print_info(f"Could not decode file: {file_path}")
             return ""
         except Exception as e:
-            print(f"[RAG] Code extraction error for {file_path}: {e}")
+            _print_error(f"Code extraction error for {file_path}: {e}")
             return ""
 
     def process_file(self, file_path: str) -> List[str]:
@@ -1009,7 +1100,7 @@ class RAGEngine:
             return []
         except Exception as e:
             self._set_last_error(f"Error processing {file_path}: {e}")
-            print(f"[RAG] Error processing {file_path}: {e}")
+            _print_error(f"processing {file_path}: {e}")
             return []
 
     def ingest_documents(self, file_paths: List[str]) -> bool:
@@ -1215,7 +1306,7 @@ class RAGEngine:
             try:
                 removed = self.compact_index()
                 if removed > 0:
-                    print(f"[RAG] Compacted index: removed {removed} inactive vectors.")
+                    _print_info(f"Compacted index: removed {removed} inactive vectors.")
             except Exception:
                 pass
                 
@@ -1243,7 +1334,7 @@ class RAGEngine:
 
     def ingest_folder(self, folder_path: str, recursive: bool = True) -> bool:
         if not os.path.isdir(folder_path):
-            print(f"[RAG] Invalid folder: {folder_path}")
+            _print_info(f"Invalid folder: {folder_path}")
             return False
 
         folder_abs = os.path.abspath(folder_path)
@@ -1327,7 +1418,7 @@ class RAGEngine:
                 except Exception as e:
                     logger.exception("Failed to save state after reconciling deleted files")
 
-        print(f"[RAG] Found {seen} supported files in {folder_abs}")
+        _print_info(f"Found {seen} supported files in {folder_abs}")
         return bool(added_total > 0)
 
     def generate_hyde_document(self, query: str, llm_completion_fn=None) -> str:
@@ -1571,7 +1662,7 @@ class RAGEngine:
             return removed
             
         except Exception as e:
-            print(f"[RAG] Compaction error: {e}")
+            _print_error(f"Compaction error: {e}")
             return 0
 
     def get_stats(self) -> Dict[str, Any]:
@@ -1624,7 +1715,7 @@ class RAGEngine:
         self.chunk_meta = []
         self.indexed_folder = ""
         self.state = {"version": 1, "files": {}}
-        print("[RAG] Index reset. All data cleared.")
+        _print_success(f"Index reset. All data cleared.")
 
     def get_relevant_chunks(self, query: str, top_k: int = 5) -> List[str]:
         result = self.query_with_sources(query, top_k)

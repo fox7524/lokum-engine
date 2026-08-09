@@ -24,6 +24,7 @@ dependencies = [
   "huggingface_hub",
   "rank_bm25",
   "nltk",
+  "rich",
 ]
 
 [project.urls]
