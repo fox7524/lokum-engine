@@ -1061,6 +1061,36 @@ class RAGEngine:
             _print_error(f"Image OCR error for {file_path}: {e}")
             return ""
 
+
+    def extract_from_html(self, file_path: str) -> str:
+        try:
+            from bs4 import BeautifulSoup
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                soup = BeautifulSoup(f, "html.parser")
+                return soup.get_text(separator=" ", strip=True)
+        except ImportError:
+            _print_warning("beautifulsoup4 not installed. HTML parsing may be poor.")
+            return self.extract_from_code(file_path)
+        except Exception as e:
+            self._set_last_error(str(e))
+            return ""
+
+    def extract_from_markdown(self, file_path: str) -> str:
+        try:
+            import markdown
+            from bs4 import BeautifulSoup
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                md_text = f.read()
+                html = markdown.markdown(md_text)
+                soup = BeautifulSoup(html, "html.parser")
+                return soup.get_text(separator=" ", strip=True)
+        except ImportError:
+            _print_warning("markdown or beautifulsoup4 not installed. Using raw text.")
+            return self.extract_from_code(file_path)
+        except Exception as e:
+            self._set_last_error(str(e))
+            return ""
+
     def extract_from_code(self, file_path: str) -> str:
         try:
             for encoding in ["utf-8", "latin-1", "cp1252"]:
@@ -1084,6 +1114,10 @@ class RAGEngine:
         try:
             if ext == ".pdf":
                 content = self.extract_from_pdf(file_path)
+            elif ext in [".md", ".markdown"]:
+                content = self.extract_from_markdown(file_path)
+            elif ext in [".html", ".htm"]:
+                content = self.extract_from_html(file_path)
             elif ext in [".docx", ".doc"]:
                 content = self.extract_from_docx(file_path)
             elif ext == ".zim":
@@ -1421,6 +1455,20 @@ class RAGEngine:
         _print_info(f"Found {seen} supported files in {folder_abs}")
         return bool(added_total > 0)
 
+
+    def _expand_query(self, query: str) -> list[str]:
+        import re
+        expanded = [query]
+        clean = re.sub(r'[^a-zA-Z0-9\s]', ' ', query.lower())
+        if clean != query.lower():
+            expanded.append(clean)
+        words = clean.split()
+        if len(words) > 3:
+            long_words = [w for w in words if len(w) > 4]
+            if long_words:
+                expanded.append(" ".join(long_words))
+        return expanded
+
     def generate_hyde_document(self, query: str, llm_completion_fn=None) -> str:
         if llm_completion_fn:
             prompt = f"Please write a passage to answer the question\nQuestion: {query}\nPassage:"
@@ -1461,9 +1509,13 @@ class RAGEngine:
             self._check_abort()
             
             search_text = query_text
+            expanded_queries = self._expand_query(query_text)
+            
             if use_hyde and llm_completion_fn:
                 hyde_doc = self.generate_hyde_document(query_text, llm_completion_fn)
-                search_text = f"{query_text} {hyde_doc}"
+                search_text = f"{' '.join(expanded_queries)} {hyde_doc}"
+            else:
+                search_text = " ".join(expanded_queries)
             
             query_vector = self.embedding_model.encode([search_text])
             query_vector = np.array(query_vector).astype("float32")
@@ -1720,3 +1772,42 @@ class RAGEngine:
     def get_relevant_chunks(self, query: str, top_k: int = 5) -> List[str]:
         result = self.query_with_sources(query, top_k)
         return result.get("chunks", [])
+
+
+    def generate_answer(self, query: str, model_id: str = "mlx-community/Phi-3-mini-4k-instruct-4bit", k: int = 3, max_tokens: int = 512, use_hybrid: bool = True) -> dict:
+        """
+        End-to-end RAG text generation using local MLX-LM.
+        Searches the index, retrieves contexts, and generates an answer locally.
+        """
+        try:
+            from lokum_engine.rag.generator import LocalGenerator
+        except ImportError:
+            _print_error("LocalGenerator could not be imported.")
+            return {"answer": "", "sources": [], "error": "Generator missing"}
+            
+        # 1. Search for context
+        _print_info(f"Searching index for: '{query}'")
+        search_results = self.query_with_sources(query, k=k, use_hybrid=use_hybrid)
+        
+        chunks = search_results.get("chunks", [])
+        if not chunks:
+            _print_warning("No relevant context found in index. Generating without context.")
+            
+        # 2. Generate answer
+        _print_info(f"Generating answer using model: {model_id}...")
+        try:
+            # Lazy load generator to save memory if unused
+            if not hasattr(self, "_generator") or getattr(self, "_generator").model_id != model_id:
+                self._generator = LocalGenerator(model_id=model_id, lazy_load=True)
+                
+            answer = self._generator.generate(query=query, contexts=chunks, max_tokens=max_tokens)
+            _print_success("Answer generated successfully.")
+            return {
+                "answer": answer,
+                "sources": search_results.get("sources", []),
+                "context_used": chunks,
+                "error": ""
+            }
+        except Exception as e:
+            _print_error(f"Text generation failed: {e}")
+            return {"answer": "", "sources": search_results.get("sources", []), "error": str(e)}

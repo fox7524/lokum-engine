@@ -25,6 +25,9 @@ dependencies = [
   "rank_bm25",
   "nltk",
   "rich",
+  "beautifulsoup4",
+  "markdown",
+  "mlx-lm",
 ]
 
 [project.urls]
