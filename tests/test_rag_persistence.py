@@ -27,6 +27,8 @@ class TestRagPersistence(unittest.TestCase):
         eng.enabled = True
         eng.embedding_model = _StubEmbedder()
         eng.index = None
+        eng.bm25_index = None
+        eng._bm25_doc_count = 0
         eng.documents = []
         eng.chunk_meta = []
         eng.last_error = ""
