@@ -1,153 +1,118 @@
-# 📖 Lokum Engine: Comprehensive User Guide
+# Lokum Engine User Guide
 
-Welcome to the ultimate deep-dive into the **Lokum Engine** (v1.0.0). This guide is designed to take you from a beginner to an absolute master of enterprise-grade Retrieval-Augmented Generation (RAG) and MLX LoRA Fine-Tuning.
-
----
-
-## 📑 Table of Contents
-1. [The Philosophy of Quality Profiles](#1-the-philosophy-of-quality-profiles)
-2. [RAG Engine Deep Dive](#2-rag-engine-deep-dive)
-    - [Initialization & Ingestion](#initialization--ingestion)
-    - [Semantic Chunking with NLTK](#semantic-chunking-with-nltk)
-    - [Hybrid Search (FAISS + BM25) & RRF](#hybrid-search-faiss--bm25--rrf)
-    - [HyDE (Hypothetical Document Embeddings)](#hyde-hypothetical-document-embeddings)
-3. [Fine-Tuning Engine Deep Dive](#3-fine-tuning-engine-deep-dive)
-    - [ChatML-Safe Presplitting](#chatml-safe-presplitting)
-    - [Auto Data Curation (Deduplication & LLM-as-a-judge)](#auto-data-curation)
-    - [DPO / ORPO Preference Datasets](#dpo--orpo-preference-datasets)
-    - [Extreme MLX Speed Optimizations](#extreme-mlx-speed-optimizations)
-4. [Environment Variables Reference](#4-environment-variables-reference)
+This guide provides technical details on the architecture, components, and configuration of Lokum Engine.
 
 ---
 
-## 1. The Philosophy of Quality Profiles
+## 1. Quality Profiles
 
-Lokum Engine introduces a unique concept called **Quality Profiles** (`Base`, `Mid`, `Fab`). Instead of forcing developers to manually configure 20 different hyper-parameters (like chunk sizes, overlap, faiss metric types, MLX layers, etc.), you simply pick a profile based on your hardware and target quality.
+Lokum Engine uses predefined configuration profiles (`Base`, `Mid`, `Fab`) to standardize hyper-parameters across different hardware constraints.
 
-- **`FinetuneEngineBase` / `RAGEngineBase`:** Prioritizes speed and memory efficiency. Great for M1/M2 Airs with 8GB-16GB RAM.
-- **`FinetuneEngineMid` / `RAGEngineMid`:** The sweet spot. Balances enterprise features with reasonable execution times.
-- **`FinetuneEngineFab` / `RAGEngineFab`:** The "Fabulous" profile. Unlocks the largest context windows, most aggressive RAG fetch multipliers, highest MLX layers, and maximum accuracy. Perfect for M-Series Max/Ultra chips (32GB+ RAM) or production cloud deployments.
+- **`Base`:** Prioritizes execution speed and memory efficiency. Optimized for entry-level Apple Silicon (e.g., M1/M2 with 8GB-16GB RAM). Uses lower chunk sizes and smaller fine-tuning batch sizes.
+- **`Mid`:** The default profile. Balances feature usage with memory constraints. Suitable for standard development environments.
+- **`Fab`:** Unlocks maximum context windows, aggressive fetch multipliers, and higher MLX layers. Requires higher memory capacity (e.g., M-Series Max/Ultra chips).
 
 ---
 
-## 2. RAG Engine Deep Dive
+## 2. RAG Engine Capabilities
 
-The Lokum RAG Engine is not just a wrapper around FAISS. It is a complete pipeline that handles text extraction (PDF, DOCX, Markdown, Code, ZIM), chunking, vectorization, and retrieval.
+The RAG Engine provides a pipeline for document extraction, semantic chunking, indexing, and retrieval.
 
 ### Initialization & Ingestion
 
 ```python
-from lokum_engine import RAGEngineFab
+from lokum_engine import RAGEngineMid
 
-rag = RAGEngineFab(storage_dir="./my_enterprise_index")
-
-# Ingest an entire directory recursively
+rag = RAGEngineMid(storage_dir="./index")
 rag.ingest_folder("/path/to/docs", recursive=True)
-
-# Lokum Engine automatically handles state. 
-# If you run `ingest_folder` again, it only processes new or modified files!
 ```
+The ingestion process maintains a local state file. Subsequent calls to `ingest_folder` will only process new or modified files.
 
-### Semantic Chunking with NLTK
-Traditional RAG engines split text by character count (e.g., every 500 characters). This often slices sentences in half, destroying the semantic meaning. 
-Lokum Engine uses **NLTK (Natural Language Toolkit)** under the hood. It tokenizes the document by actual sentence boundaries, grouping sentences together until they reach the target chunk size.
+### Semantic Chunking
+Instead of standard character-count splitting, the engine uses the NLTK library to tokenize documents at sentence boundaries. This ensures that context chunks contain complete semantic units before reaching the specified size limit.
 
-### Hybrid Search (FAISS + BM25) & RRF
-Relying solely on dense vector embeddings (Cosine Similarity) is dangerous. It's great for conceptual questions but terrible at exact keyword matching (e.g., searching for a specific product ID like "LKM-992").
-
-Lokum Engine natively builds a **Sparse Index (BM25)** alongside the **Dense Index (FAISS)**.
-When you call `rag.query()`, the engine:
-1. Fetches the Top-K results using semantic FAISS vectors.
-2. Fetches the Top-K results using exact-match BM25.
-3. Merges them using **Reciprocal Rank Fusion (RRF)**, mathematically calculating the optimal rank for each chunk.
-
-*This is enabled by default in the `Fab` profile. You don't have to write a single extra line of code!*
+### Hybrid Search (FAISS + BM25)
+The engine maintains both a dense vector index (FAISS) and a sparse index (BM25). During a query:
+1. The dense index returns Top-K results based on semantic similarity.
+2. The sparse index returns Top-K results based on exact keyword matching.
+3. The results are merged using Reciprocal Rank Fusion (RRF) to normalize the scoring.
 
 ### HyDE (Hypothetical Document Embeddings)
-HyDE is an advanced RAG technique. Instead of searching the database using the user's short question, it uses an LLM to generate a "fake" (hypothetical) answer, and then searches the database using that generated answer. This drastically improves recall.
+HyDE is supported by passing a completion function to the query. The engine will generate a hypothetical response using the provided LLM function and use it to execute the retrieval.
 
 ```python
-# To use HyDE, you just need to pass an LLM completion function to the query
-def my_llm_completion(prompt: str) -> str:
-    # Call OpenAI, Anthropic, or a local MLX model here
+def llm_completion(prompt: str) -> str:
+    # Implementation for LLM inference
     return "..."
 
 results = rag.query(
-    search_text="How do I configure the firewall?", 
+    search_text="System configuration steps", 
     k=5, 
-    hyde_completion_fn=my_llm_completion
+    hyde_completion_fn=llm_completion
 )
 ```
 
 ---
 
-## 3. Fine-Tuning Engine Deep Dive
+## 3. Fine-Tuning Engine Capabilities
 
-Lokum Engine wraps the incredible `mlx-lm` library, adding enterprise-grade safety nets, data curation pipelines, and extreme optimizations for Apple Silicon.
+The Fine-Tuning Engine acts as an abstraction layer over `mlx-lm`, focusing on dataset integrity and memory management.
 
-### ChatML-Safe Presplitting
-The #1 cause of bad fine-tuning runs is Out-Of-Memory (OOM) errors caused by massive text samples. 
-To prevent this, Lokum Engine pre-splits your dataset. **However**, unlike naive splitters, our `_presplit_text` logic is **ChatML-aware**. 
+### ChatML-Aware Presplitting
+To mitigate Out-Of-Memory (OOM) errors caused by large token sequences, the engine pre-splits the dataset. The `_presplit_text` function parses ChatML markers (`<|im_start|>` and `<|im_end|>`) and splits large contexts at paragraph boundaries to ensure instruction tags remain intact.
 
-If it detects `<|im_start|>` and `<|im_end|>` tags, it will *never* slice a string in the middle of a tag. It carefully dissects the conversation at paragraph boundaries, ensuring the model never learns broken prompt templates.
-
-### Auto Data Curation
-Garbage in, garbage out. Lokum Engine v1.0.0 ships with a brand new `curation.py` module.
+### Data Curation
+The `curation.py` module provides functions to sanitize datasets before training:
 
 ```python
 from lokum_engine.finetune.curation import deduplicate_dataset, auto_score_dataset
 
-# 1. Deduplicate your dataset using MinHash (Jaccard similarity)
-# Removes slightly reworded or duplicate rows that cause overfitting
+# Deduplicate dataset using MinHash (Jaccard similarity)
 deduplicate_dataset(
     input_path="raw_data.jsonl", 
     output_path="clean_data.jsonl", 
     similarity_threshold=0.85
 )
 
-# 2. Score your dataset (LLM-as-a-judge)
-# Removes low-quality or nonsensical rows before training
+# Filter dataset using an LLM-as-a-judge scoring function
 auto_score_dataset(
     input_path="clean_data.jsonl",
-    output_path="premium_data.jsonl",
-    scoring_fn=my_llm_scoring_function, # Should return 1-10
+    output_path="filtered_data.jsonl",
+    scoring_fn=scoring_function,
     min_score=7.0
 )
 ```
 
-### DPO / ORPO Preference Datasets
-Standard fine-tuning (SFT) just teaches the model to talk like the dataset. **Direct Preference Optimization (DPO)** teaches the model *what not to say*. 
-
-Lokum Engine provides a native builder for preference datasets:
+### Preference Datasets (DPO / ORPO)
+The engine provides formatting utilities to convert prompt/chosen/rejected triplets into the JSONL schema required for MLX Direct Preference Optimization.
 
 ```python
-from lokum_engine import FinetuneEngineFab
+from lokum_engine import FinetuneEngineMid
 
-ft = FinetuneEngineFab(model_path="mlx-community/Llama-3-8B-Instruct-4bit")
+ft = FinetuneEngineMid(model_path="mlx-community/Llama-3-8B-Instruct-4bit")
 
 preference_data = [
     {
-        "prompt": "Write a python script to delete all files.",
-        "chosen": "I cannot help with destructive actions.",
-        "rejected": "import os; os.system('rm -rf /')"
+        "prompt": "User query",
+        "chosen": "Correct response",
+        "rejected": "Incorrect response"
     }
 ]
 
-# Automatically formats to the exact JSONL schema required for MLX DPO
 train_path, valid_path = ft.prepare_preference_dataset(preference_data)
 ```
 
-### Extreme MLX Speed Optimizations
-Under the hood, `start_training()` passes a highly optimized set of flags to the MLX compiler.
-- **`--grad-checkpoint`**: Enabled by default in `Mid` and `Fab` profiles, saving massive amounts of RAM at a slight compute cost.
-- **Metal Log Suppression**: Automatically silences the noisy `MTL_LOG_LEVEL` and IOSurface warnings on macOS, keeping your terminal clean.
-- **Dynamic Batching**: Automatically scales batch sizes based on the `max_seq_length` and your chosen profile.
+### MLX Optimizations
+The training process automatically applies the following configurations:
+- **Gradient Checkpointing:** Enabled by default in `Mid` and `Fab` profiles to reduce memory footprint.
+- **Dynamic Batching:** Scales batch sizes relative to the `max_seq_length`.
+- **Log Suppression:** Modifies `MTL_LOG_LEVEL` environment variables to reduce standard output noise on macOS.
 
 ---
 
-## 4. Environment Variables Reference
+## 4. Environment Variables
 
-Power users can override *any* Quality Profile setting using environment variables. 
+Engine parameters can be overridden using environment variables.
 
 **RAG Variables:**
 - `LOKUMAI_RAG_CHUNK_SIZE` (int)
@@ -157,10 +122,7 @@ Power users can override *any* Quality Profile setting using environment variabl
 
 **Fine-Tuning Variables:**
 - `LOKUMAI_FT_QUALITY` (base, mid, fab)
-- `LOKUMAI_FT_MAX_SEQ_LENGTH` (int, e.g., 2048)
+- `LOKUMAI_FT_MAX_SEQ_LENGTH` (int)
 - `LOKUMAI_FT_GRAD_CHECKPOINT` (1 or 0)
 - `LOKUMAI_FT_BATCH_SIZE` (int)
-- `LOKUMAI_FT_PRESPLIT_CHARS_PER_TOKEN` (float, default 4.0)
-
----
-*Built with ❤️ by developers who got tired of fighting infrastructure and just wanted to train great AI models.*
+- `LOKUMAI_FT_PRESPLIT_CHARS_PER_TOKEN` (float)

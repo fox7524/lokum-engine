@@ -1,125 +1,79 @@
-<div align="center">
+# Lokum Engine
 
-# 🌌 Lokum Engine 🌟
+[![PyPI Version](https://img.shields.io/pypi/v/lokum-engine.svg)](https://pypi.org/project/lokum-engine/)
+[![Python Versions](https://img.shields.io/pypi/pyversions/lokum-engine.svg)](https://pypi.org/project/lokum-engine/)
+[![License](https://img.shields.io/pypi/l/lokum-engine.svg)](https://opensource.org/licenses/MIT)
 
-**The Undisputed King of RAG & LLM Fine-Tuning**
+Lokum Engine is a Python library that provides integrated pipelines for Retrieval-Augmented Generation (RAG) and MLX-based LLM fine-tuning. It is designed to simplify local AI development on Apple Silicon by handling data processing, vector indexing, and MLX memory optimizations natively.
 
-[![PyPI Version](https://img.shields.io/pypi/v/lokum-engine.svg?style=for-the-badge&color=blue)](https://pypi.org/project/lokum-engine/)
-[![Python Versions](https://img.shields.io/pypi/pyversions/lokum-engine.svg?style=for-the-badge)](https://pypi.org/project/lokum-engine/)
-[![License](https://img.shields.io/pypi/l/lokum-engine.svg?style=for-the-badge&color=green)](https://opensource.org/licenses/MIT)
-[![Status](https://img.shields.io/badge/Status-Enterprise_Ready-purple?style=for-the-badge)](#)
-[![Downloads](https://static.pepy.tech/badge/lokum-engine)](https://pepy.tech/project/lokum-engine)
+## Features
 
-*From local experimentation to Fortune 500 production in 3 lines of code.*
+### RAG Engine
+* **Hybrid Search:** Combines dense retrieval (FAISS Cosine Similarity) with sparse retrieval (BM25) using Reciprocal Rank Fusion (RRF).
+* **Semantic Chunking:** Uses NLTK for sentence-boundary aware text splitting instead of fixed-character limits.
+* **HyDE Support:** Allows integration with external LLM functions to perform Hypothetical Document Embeddings for expanded query recall.
+* **Multi-format Ingestion:** Supports automated text extraction from PDF, DOCX, Markdown, Code files, and ZIM archives.
 
-[Quickstart](#quickstart) • [Features](#why-lokum-engine) • [User Guide](docs/USER_GUIDE.md) • [Roadmap](docs/ROADMAP.md)
+### Fine-Tuning Engine
+* **Apple Silicon Optimized:** Built on top of `mlx-lm` with configurable profiles for gradient checkpointing, batch sizing, and memory management.
+* **ChatML-Safe Presplitting:** Pre-processes long training samples to prevent Out-Of-Memory (OOM) errors without breaking `<|im_start|>` and `<|im_end|>` boundaries.
+* **Preference Optimization:** Includes dataset formatting utilities for Direct Preference Optimization (DPO) and ORPO workflows.
+* **Data Curation:** Provides MinHash-based deduplication and LLM-as-a-judge scoring functions to clean training datasets.
 
-</div>
+## Installation
 
----
-
-## ⚡ Why Lokum Engine?
-
-Lokum Engine is the developer-first building block for **Retrieval-Augmented Generation (RAG)** and **State-of-the-Art LLM Fine-Tuning**. We abstracted away the infrastructure headaches, OOM crashes, and broken data pipelines so you can focus on building intelligent agents.
-
-With the **v1.0.0** release, Lokum Engine sets the industry standard. It is specifically designed to push Apple Silicon to its absolute limits while providing features that usually require a sprawling microservice architecture.
-
-### 🚀 Groundbreaking Features
-- **Hybrid Search (FAISS + BM25):** Combines dense semantic vector search (Cosine Similarity) with sparse keyword search (BM25) using Reciprocal Rank Fusion (RRF) for unparalleled accuracy.
-- **HyDE (Hypothetical Document Embeddings):** Expands user queries intelligently before retrieval, dramatically increasing recall for complex questions.
-- **Semantic Chunking:** Slices text at logical sentence boundaries instead of arbitrary character counts. Context is never awkwardly cut in half.
-- **DPO / ORPO Support:** Move beyond standard fine-tuning (SFT) and align models with human preferences natively using our automated preference dataset builders.
-- **Auto Data Curation:** Built-in tools for MinHash deduplication and LLM-as-a-judge dataset scoring to ensure only high-quality data reaches your model.
-- **Extreme MLX Speed Optimizations:** Dynamic batching, advanced gradient checkpointing, and environment variable tuning to squeeze every drop of performance out of Apple Silicon.
-- **ChatML-Safe Presplitting:** Guarantee your fine-tuning data never splits across critical instruction boundaries.
-
----
-
-## 📦 Install
+Install via pip:
 
 ```bash
 pip install lokum-engine
 ```
-*(Note: Lokum Engine intentionally includes heavy, production-grade dependencies like FAISS, sentence-transformers, PyMuPDF, rank_bm25, nltk, and MLX out of the box).*
 
----
+## Usage
 
-## 🧠 Quickstart: RAG (Retrieval-Augmented Generation)
-
-Turn any folder of documents into a highly accurate semantic search engine instantly.
+### RAG Pipeline
 
 ```python
-from lokum_engine import RAGEngineFab
+from lokum_engine import RAGEngineMid
 
-# Initialize with the 'Fab' profile for maximum enterprise-grade retrieval quality
-rag = RAGEngineFab()  
+# Initialize the engine with a default storage directory
+rag = RAGEngineMid(storage_dir="./index_storage")
 
-# Recursively ingest PDFs, Markdown, Code, and text files
-# Now with Semantic Chunking and BM25 Hybrid Indexing!
-rag.ingest_folder("/path/to/your/enterprise/docs", recursive=True)
+# Ingest documents from a directory
+rag.ingest_folder("/path/to/documents", recursive=True)
 
-# Query with semantic understanding (Hybrid Search + RRF applied automatically)
-context = rag.query("How do we scale our distributed training pipeline?", k=5)
-print(context)
+# Query the hybrid index
+results = rag.query("How to configure the network?", k=5)
+print(results)
 ```
 
----
-
-## 🎯 Quickstart: Fine-Tuning (MLX LoRA)
-
-Train state-of-the-art models on your own data without wrestling with CUDA errors or dataset corruption.
+### Fine-Tuning Pipeline
 
 ```python
-from lokum_engine import FinetuneEngineFab
+from lokum_engine import FinetuneEngineMid
 
-# Initialize the engine
-ft = FinetuneEngineFab(model_path="/path/to/mlx/base-model")
+# Initialize the fine-tuning engine
+ft = FinetuneEngineMid(model_path="mlx-community/Llama-3-8B-Instruct-4bit")
 
-# Safely presplit the dataset to avoid OOMs while perfectly preserving ChatML tags
+# Pre-split the dataset to avoid OOM issues during training
 ft.presplit_dataset(
-    dataset_path="/path/to/raw/data", 
+    dataset_path="train.jsonl", 
     max_seq_length=2048, 
     batch_size=4
 )
 
-# Launch the highly optimized training loop
+# Start the MLX training process
 process = ft.start_training(
-    dataset_path="/path/to/raw/data",
+    dataset_path="train.jsonl",
     batch_size=4,
     num_layers=16,
-    iters=1000,
+    iters=1000
 )
-
-print(f"🚀 Training launched successfully! PID: {process.pid}")
 ```
 
----
+## Documentation
 
-## 🎛️ Quality Profiles: The Magic of Lokum
+For detailed information on configuration profiles, environment variables, and advanced usage, please refer to the [User Guide](docs/USER_GUIDE.md).
 
-Stop guessing hyper-parameters. Lokum Engine ships with three tuned profiles for both RAG and Fine-Tuning:
+## License
 
-| Profile | Target Audience | Focus | RAG Behavior | Fine-Tune Behavior |
-|---------|-----------------|-------|--------------|--------------------|
-| `Base` | Local Devs | Speed & Efficiency | Lighter embedding models, faster retrieval | Smaller batch sizes, faster epochs |
-| `Mid` | Startups | The Sweet Spot | Balanced chunking and embedding | Standard LoRA parameters |
-| `Fab` | Enterprises | Maximum Quality | Heavy embeddings, hybrid search, semantic chunking | High-layer targeting, max context length |
-
----
-
-## 📚 Comprehensive Documentation
-
-Want to learn how to generate a DPO dataset? Curious about how Reciprocal Rank Fusion works under the hood? Need to deduplicate a massive dataset before training?
-
-👉 **[Read the Extensive User Guide Here](docs/USER_GUIDE.md)**
-
----
-
-## 🤝 Contributing & Community
-
-Lokum Engine is built by developers, for developers. We welcome PRs, issues, and ideas. 
-If this project helped you build something awesome, **please leave a ⭐ on GitHub!** It helps the community grow.
-
-## 📜 License
-
-MIT License - free for indie hackers and Fortune 500s alike.
+This project is licensed under the MIT License.
