@@ -2,7 +2,7 @@
 
 [![PyPI Version](https://img.shields.io/pypi/v/lokum-engine.svg)](https://pypi.org/project/lokum-engine/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/lokum-engine.svg)](https://pypi.org/project/lokum-engine/)
-[![License](https://img.shields.io/pypi/l/lokum-engine.svg)](https://opensource.org/licenses/MIT)
+[![License: CC BY-NC 4.0](https://img.shields.io/badge/License-CC%20BY--NC%204.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc/4.0/)
 
 Lokum Engine is a Python library that provides integrated pipelines for Retrieval-Augmented Generation (RAG) and MLX-based LLM fine-tuning. It is designed to simplify local AI development on Apple Silicon by handling data processing, vector indexing, and MLX memory optimizations natively.
 
@@ -76,4 +76,4 @@ For detailed information on configuration profiles, environment variables, and a
 
 ## License
 
-This project is licensed under the MIT License.
+This project is licensed under the Creative Commons Attribution-NonCommercial 4.0 International License (CC BY-NC 4.0). You are free to use, share, and adapt the code for non-commercial purposes, provided you give appropriate credit. See the [LICENSE](LICENSE) file for full details.
